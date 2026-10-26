@@ -24,14 +24,29 @@ Shifts change all the time: someone gets sick, someone needs a day off, two peop
 
 ## Documentation
 
-| Deliverable | Status |
-|---|---|
-| Product description (SRS, UML, identity management) | In progress |
-| Architecture and concurrency flows | Planned |
-| Data, resiliency, security, deployment models | Planned |
-| Analytics and monitoring models | Planned |
-| Demo and report | Planned |
+The [documentation index](docs/README.md) shows where each course requirement is.
+
+| Deliverable | Document | Status |
+|---|---|---|
+| Product description (SRS, UML, identity management) | [docs/01-srs.md](docs/01-srs.md) | Done |
+| Architecture | [docs/02-architecture.md](docs/02-architecture.md) | Done |
+| Error handling design | [docs/03-error-handling.md](docs/03-error-handling.md), [docs/api/openapi.yaml](docs/api/openapi.yaml) | Done |
+| Concurrency flows | [docs/04-concurrency.md](docs/04-concurrency.md) | Done |
+| Data, resiliency, security, deployment models | — | Planned |
+| Analytics and monitoring models | — | Planned |
+| Demo and report | — | Planned |
+
+To check the documentation, run `npm ci` and then `npm run docs:check` (Node.js 22.13 or later).
 
 ## Tech stack
 
-To be decided.
+| Layer | Technology |
+|---|---|
+| Client | Angular single-page application (PWA for Web Push) |
+| Services | NestJS (TypeScript) microservices on Amazon EKS |
+| Data | PostgreSQL (Amazon RDS), one database per service |
+| Messaging | Apache Kafka (Amazon MSK) |
+| Cache, rate limits, idempotency | Redis (Amazon ElastiCache) |
+| Identity | Amazon Cognito (OIDC, MFA) |
+| Notifications | WebSocket, Web Push, email (Amazon SES) |
+| Documentation | Markdown, Mermaid, OpenAPI 3.1 |
