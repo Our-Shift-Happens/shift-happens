@@ -1,0 +1,4129 @@
+openapi: 3.1.0
+info:
+  title: Shift Happens API
+  version: 1.0.0
+  summary: Public REST API of Shift Happens, a multi-tenant SaaS for employee shift scheduling.
+  description: |-
+    Shift Happens is a multi-tenant SaaS for employee shift scheduling. Managers create and publish
+    weekly schedules. Employees claim open shifts, swap shifts and ask colleagues to cover shifts.
+
+    This file is the spec-first contract of the 12 operations API-01 to API-12 (deliverable 5).
+    Each operation has the vendor extension `x-api-id` with its ID.
+
+    ## Error contract
+
+    - Every 4xx and 5xx response uses Problem Details (RFC 9457) with the media type `application/problem+json`.
+    - Every problem has the members `type`, `title`, `status`, `detail`, `instance`, `code` and `traceId`.
+    - Clients switch on `code`. They do not parse `title` or `detail`.
+    - Extension members give the data that the client needs to react: `errors[]`, `violations[]`,
+      `overridable`, `currentVersion`, `currentState`, `resource` and `retryAfterSeconds`.
+    - Each operation documents every error that it can return as a named example. The name of the
+      example is the `code` in lower camel case. Each example tells the cause and the client reaction.
+    - All operations share the responses 401 `AUTHENTICATION_REQUIRED`, 500 `INTERNAL_ERROR` and
+      503 `SERVICE_UNAVAILABLE`.
+    - Error bodies never contain stack traces, SQL text or internal host names. Support uses `traceId`
+      to find the request in the logs and traces.
+
+    The full design (status semantics, error code catalogue, client reactions, rate limits and
+    idempotency) is in [Error handling design](../03-error-handling.md).
+  contact:
+    name: Shift Happens team
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://api.shifthappens.example/api/v1
+    description: Production
+  - url: https://api.staging.shifthappens.example/api/v1
+    description: Staging
+security:
+  - cognitoBearer: []
+tags:
+  - name: Organization
+    description: |-
+      Members, invitations and the member lifecycle (joiner, leaver). The Organization service
+      (`organization-service`) owns these resources and makes the Amazon Cognito admin calls.
+  - name: Scheduling
+    description: |-
+      Schedules, shifts, assignments and claims. The Scheduling service (`scheduling-service`) owns
+      these resources, runs the labor rule engine and protects capacity with row locks.
+  - name: Trades
+    description: |-
+      Trade requests (`SWAP` and `COVER`). The Trade service (`trade-service`) is the orchestrator of
+      the trade saga. The Scheduling service executes the trade in one local transaction.
+  - name: Analytics
+    description: |-
+      Coverage analytics. The Analytics service (`analytics-service`) answers from an eventually
+      consistent read model.
+paths:
+  /orgs/{orgId}/invitations:
+    post:
+      operationId: inviteMember
+      x-api-id: API-01
+      x-service: Organization service (`organization-service`)
+      x-requirements: [REQ-FUNC-001]
+      x-concurrency: [CS-4]
+      tags: [Organization]
+      summary: 'API-01: Invite a member'
+      description: |-
+        Creates an invitation to join the organization with a role, locations and positions. The
+        Organization service sends the invitation email through Amazon SES. The invitation expires
+        after 7 days. One organization can send 200 invitations per day.
+
+        **Roles:** ADMIN (any role, any location). MANAGER (role EMPLOYEE, own locations only).
+
+        **Concurrency:** CS-4. The `Idempotency-Key` header is optional. With a key, a retry after a timeout does not send a second invitation.
+
+        **Requirements:** REQ-FUNC-001.
+
+        **API ID:** `x-api-id: API-01`.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteMemberRequest'
+            examples:
+              inviteBarista:
+                summary: Iryna Bondar invites Taras Melnyk as a barista of Rynok Square
+                value:
+                  email: 'taras.melnyk@example.com'
+                  role: EMPLOYEE
+                  locationIds: ['7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a']
+                  positionIds: ['a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d']
+      responses:
+        '201':
+          description: The invitation is created and the invitation email is queued.
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+              examples:
+                invitationCreated:
+                  summary: A pending invitation
+                  value:
+                    id: '2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6f'
+                    orgId: '0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e'
+                    email: 'taras.melnyk@example.com'
+                    role: EMPLOYEE
+                    locationIds: ['7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a']
+                    positionIds: ['a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d']
+                    status: PENDING
+                    expiresAt: '2026-11-05T10:30:00+02:00'
+                    createdAt: '2026-10-29T10:30:00+02:00'
+        '400':
+          description: 'The body does not agree with the schema. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The email is not valid
+                  description: |-
+                    **Cause:** Iryna Bondar sends `"email": "taras.melnyk@"`.
+
+                    **Client reaction:** Show the message next to the email field and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /email
+                        code: INVALID_FORMAT
+                        message: Must be a valid email address.
+        '403':
+          description: 'The caller cannot invite this member. Codes: `ROLE_NOT_ALLOWED`, `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                roleNotAllowed:
+                  summary: A manager invites a MANAGER
+                  description: |-
+                    **Cause:** Iryna Bondar (MANAGER) sends `"role": "MANAGER"`.
+
+                    **Client reaction:** Show only the role EMPLOYEE in the invitation form of a manager and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/role-not-allowed'
+                    title: Role not allowed
+                    status: 403
+                    detail: A MANAGER can invite members with the role EMPLOYEE only.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: ROLE_NOT_ALLOWED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                locationScopeDenied:
+                  summary: The location is not in the scope of the manager
+                  description: |-
+                    **Cause:** A manager of another location sends the Rynok Square location in `locationIds`.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and show only the locations from it.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'A location in `locationIds` is not in the organization. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The location does not exist in the organization
+                  description: |-
+                    **Cause:** Iryna Bondar sends a location ID that Lviv Coffee Co. does not have.
+
+                    **Client reaction:** Remove the location from the form, reload the list of locations and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Location 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c was not found.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Location
+                      id: '5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c'
+        '409':
+          description: 'The email already has a membership or a pending invitation. Codes: `ALREADY_MEMBER`, `INVITATION_ALREADY_PENDING`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                alreadyMember:
+                  summary: The email belongs to an active member
+                  description: |-
+                    **Cause:** Iryna Bondar invites `olena.kovalenko@example.com`, the email of an active member.
+
+                    **Client reaction:** Show the profile of the member from `currentState.userId` and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/already-member'
+                    title: Already a member
+                    status: 409
+                    detail: The email olena.kovalenko@example.com belongs to an active member.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: ALREADY_MEMBER
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      userId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                      status: ACTIVE
+                invitationAlreadyPending:
+                  summary: A pending invitation for this email exists
+                  description: |-
+                    **Cause:** Iryna Bondar invites `taras.melnyk@example.com` a second time on the same day.
+
+                    **Client reaction:** Offer "Resend invitation" for `currentState.invitationId` and do not create a second invitation.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invitation-already-pending'
+                    title: Invitation already pending
+                    status: 409
+                    detail: A pending invitation for taras.melnyk@example.com exists. It expires at 2026-11-05T10:30:00+02:00.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: INVITATION_ALREADY_PENDING
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      invitationId: '2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6f'
+                      status: PENDING
+                      expiresAt: '2026-11-05T10:30:00+02:00'
+        '429':
+          description: |-
+            A quota is empty. Codes: `INVITATION_QUOTA_EXCEEDED` (200 invitations per organization per day,
+            reset at 00:00 UTC) and `RATE_LIMITED` (policy `invitations`, 20 invitations per user per 3600 s).
+          headers:
+            Retry-After:
+              description: Seconds to wait. The same value as `retryAfterSeconds`.
+              schema:
+                type: integer
+                minimum: 0
+              examples:
+                invitationQuotaExceeded:
+                  value: 55800
+                rateLimited:
+                  value: 180
+            RateLimit-Policy:
+              description: The policies of the operation. `q` is the quota, `w` is the window in seconds.
+              schema:
+                type: string
+              examples:
+                invitationQuotaExceeded:
+                  value: '"invitations";q=20;w=3600, "invitations-org";q=200;w=86400'
+                rateLimited:
+                  value: '"invitations";q=20;w=3600, "invitations-org";q=200;w=86400'
+            RateLimit:
+              description: The state of the empty policy. `r` is the remaining quota, `t` is the seconds until a reset.
+              schema:
+                type: string
+              examples:
+                invitationQuotaExceeded:
+                  value: '"invitations-org";r=0;t=55800'
+                rateLimited:
+                  value: '"invitations";r=0;t=180'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/RateLimitProblem'
+              examples:
+                invitationQuotaExceeded:
+                  summary: The organization sent 200 invitations today
+                  description: |-
+                    **Cause:** Lviv Coffee Co. sent 200 invitations on 2026-10-29 (UTC). The request comes at 08:30 UTC.
+
+                    **Client reaction:** Show the time when the quota resets (now plus `retryAfterSeconds`) and do not retry automatically.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invitation-quota-exceeded'
+                    title: Invitation quota exceeded
+                    status: 429
+                    detail: Lviv Coffee Co. sent 200 invitations today. The quota resets at 2026-10-30T00:00:00Z.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: INVITATION_QUOTA_EXCEEDED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    retryAfterSeconds: 55800
+                rateLimited:
+                  summary: The user sent 20 invitations in 3600 s
+                  description: |-
+                    **Cause:** Iryna Bondar sent 20 invitations in the last 3600 s.
+
+                    **Client reaction:** Disable the Invite button with a countdown of `Retry-After` seconds, then let the user send again.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/rate-limited'
+                    title: Too many requests
+                    status: 429
+                    detail: You sent 20 invitations in 3600 s. Wait 180 s.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/invitations'
+                    code: RATE_LIMITED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    retryAfterSeconds: 180
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /invitations/accept:
+    post:
+      operationId: acceptInvitation
+      x-api-id: API-02
+      x-service: Organization service (`organization-service`)
+      x-requirements: [REQ-FUNC-002]
+      x-concurrency: []
+      tags: [Organization]
+      summary: 'API-02: Accept an invitation'
+      description: |-
+        Accepts an invitation and creates an `ACTIVE` membership for the signed-in user (joiner flow).
+        The token comes from the invitation email. It is in the body and not in the path, so it does
+        not appear in access logs. The email of the Cognito user must be the invited email.
+
+        **Roles:** Any signed-in user who received the invitation. The user does not need a membership yet.
+
+        **Concurrency:** None. A second accept of the same invitation returns 409 `INVITATION_ALREADY_USED`.
+
+        **Requirements:** REQ-FUNC-002.
+
+        **API ID:** `x-api-id: API-02`.
+      parameters:
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInvitationRequest'
+            examples:
+              acceptToken:
+                summary: Taras Melnyk accepts the invitation 2 days after he got it
+                value:
+                  token: 5azWI546XhqexM0bBUFYryBRp6-ykIPBG_n8lZKO8aU
+      responses:
+        '200':
+          description: The membership is active.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+              examples:
+                membershipActive:
+                  summary: The new membership
+                  value:
+                    orgId: '0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e'
+                    userId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    role: EMPLOYEE
+                    locationIds: ['7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a']
+                    positionIds: ['a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d']
+                    status: ACTIVE
+                    joinedAt: '2026-10-31T09:15:00+02:00'
+        '400':
+          description: 'The token does not have the correct format. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The token is too short
+                  description: |-
+                    **Cause:** The user copied only a part of the link, and the SPA sends `"token": "5azWI546Xhqex"`.
+
+                    **Client reaction:** Tell the user to open the link from the invitation email again and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: /api/v1/invitations/accept
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /token
+                        code: INVALID_FORMAT
+                        message: Must be 43 characters from the base64url alphabet.
+        '403':
+          description: 'The signed-in email is not the invited email. Code: `INVITATION_EMAIL_MISMATCH`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invitationEmailMismatch:
+                  summary: The user signed in with another email
+                  description: |-
+                    **Cause:** Taras Melnyk signs in with a personal email, but the invitation is for `taras.melnyk@example.com`.
+
+                    **Client reaction:** Tell the user to sign out and sign in with the email that received the invitation.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invitation-email-mismatch'
+                    title: Invitation email mismatch
+                    status: 403
+                    detail: The email of your account is not the email of the invitation.
+                    instance: /api/v1/invitations/accept
+                    code: INVITATION_EMAIL_MISMATCH
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'No invitation has this token. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The token is not known
+                  description: |-
+                    **Cause:** The token has the correct format, but no invitation has it. The problem does not repeat the token, because the token is a secret.
+
+                    **Client reaction:** Show "The invitation link is not valid", tell the user to ask for a new invitation and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: No invitation has this token.
+                    instance: /api/v1/invitations/accept
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Invitation
+        '409':
+          description: 'The invitation was accepted before. Code: `INVITATION_ALREADY_USED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                invitationAlreadyUsed:
+                  summary: The invitation is accepted already
+                  description: |-
+                    **Cause:** Taras Melnyk opens the invitation link a second time after he accepted it.
+
+                    **Client reaction:** Go to the app home page.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invitation-already-used'
+                    title: Invitation already used
+                    status: 409
+                    detail: The invitation was accepted at 2026-10-31T09:15:00+02:00.
+                    instance: /api/v1/invitations/accept
+                    code: INVITATION_ALREADY_USED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      status: ACCEPTED
+        '422':
+          description: 'The invitation is older than 7 days. Code: `INVITATION_EXPIRED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invitationExpired:
+                  summary: The invitation expired
+                  description: |-
+                    **Cause:** Taras Melnyk opens the link on 2026-11-06, 8 days after the invitation.
+
+                    **Client reaction:** Tell the user to ask the admin or the manager for a new invitation.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invitation-expired'
+                    title: Invitation expired
+                    status: 422
+                    detail: The invitation expired at 2026-11-05T10:30:00+02:00. An invitation is valid for 7 days.
+                    instance: /api/v1/invitations/accept
+                    code: INVITATION_EXPIRED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /orgs/{orgId}/members/{userId}/deactivate:
+    post:
+      operationId: deactivateMember
+      x-api-id: API-03
+      x-service: Organization service (`organization-service`)
+      x-requirements: [REQ-FUNC-004]
+      x-concurrency: []
+      tags: [Organization]
+      summary: 'API-03: Deactivate a member'
+      description: |-
+        Deactivates a member (leaver flow). The membership status changes to `DEACTIVATED` first.
+        Every request checks the status, so unexpired access tokens become invalid within the 60 s
+        cache TTL of the Edge Gateway. Then the Organization service calls Cognito `AdminDisableUser`
+        and `AdminUserGlobalSignOut`. The event `MemberDeactivated` starts the cleanup in other services:
+        the Scheduling service cancels future assignments and the Trade service cancels pending trade
+        requests. The cleanup is asynchronous.
+
+        **Roles:** ADMIN with TOTP MFA.
+
+        **Concurrency:** None. A second deactivation returns 409 `MEMBER_ALREADY_DEACTIVATED`.
+
+        **Requirements:** REQ-FUNC-004.
+
+        **API ID:** `x-api-id: API-03`.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeactivateMemberRequest'
+            examples:
+              contractEnded:
+                summary: Andrii Shevchenko deactivates Taras Melnyk
+                value:
+                  reason: Contract ended
+      responses:
+        '200':
+          description: The member is deactivated. The cleanup in other services continues asynchronously.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+              examples:
+                memberDeactivated:
+                  summary: The deactivated member
+                  value:
+                    userId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    orgId: '0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e'
+                    status: DEACTIVATED
+                    deactivatedAt: '2026-11-09T11:00:00+02:00'
+        '400':
+          description: 'The body does not agree with the schema. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The reason is missing
+                  description: |-
+                    **Cause:** Andrii Shevchenko sends the body `{}`.
+
+                    **Client reaction:** Show the message next to the reason field and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/members/6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24/deactivate'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /reason
+                        code: REQUIRED
+                        message: Is required.
+        '403':
+          description: 'The caller is not an admin, or has no MFA. Codes: `ROLE_NOT_ALLOWED`, `MFA_REQUIRED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                roleNotAllowed:
+                  summary: A manager tries to deactivate a member
+                  description: |-
+                    **Cause:** Iryna Bondar (MANAGER) sends the request.
+
+                    **Client reaction:** Hide the Deactivate action for managers and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/role-not-allowed'
+                    title: Role not allowed
+                    status: 403
+                    detail: Only an ADMIN can deactivate a member.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/members/6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24/deactivate'
+                    code: ROLE_NOT_ALLOWED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                mfaRequired:
+                  summary: The admin has no MFA
+                  description: |-
+                    **Cause:** Andrii Shevchenko (ADMIN) has no TOTP MFA in Cognito.
+
+                    **Client reaction:** Send the admin to the MFA setup page, then retry after the setup.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/mfa-required'
+                    title: MFA required
+                    status: 403
+                    detail: This action needs TOTP MFA. Set up MFA for your account first.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/members/6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24/deactivate'
+                    code: MFA_REQUIRED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The user is not a member of the organization. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The member does not exist
+                  description: |-
+                    **Cause:** The path has a user ID that is not a member of Lviv Coffee Co.
+
+                    **Client reaction:** Remove the member from the list, reload the list and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Member 2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d was not found.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/members/2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d/deactivate'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Member
+                      id: '2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d'
+        '409':
+          description: 'The state of the member blocks the action. Codes: `MEMBER_ALREADY_DEACTIVATED`, `LAST_ADMIN`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                memberAlreadyDeactivated:
+                  summary: The member is deactivated already
+                  description: |-
+                    **Cause:** A second admin deactivated Taras Melnyk a short time before.
+
+                    **Client reaction:** Reload the member; no action is necessary.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/member-already-deactivated'
+                    title: Member already deactivated
+                    status: 409
+                    detail: Member 6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24 was deactivated at 2026-11-09T11:00:00+02:00.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/members/6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24/deactivate'
+                    code: MEMBER_ALREADY_DEACTIVATED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      status: DEACTIVATED
+                      deactivatedAt: '2026-11-09T11:00:00+02:00'
+                lastAdmin:
+                  summary: The admin tries to deactivate the last admin
+                  description: |-
+                    **Cause:** Andrii Shevchenko tries to deactivate his own membership. He is the only active ADMIN.
+
+                    **Client reaction:** Tell the admin to give the role ADMIN to another member first.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/last-admin'
+                    title: Last active admin
+                    status: 409
+                    detail: Member 8e4b9f5d-1c6a-4d0b-8f4e-5a7c9d1b3f46 is the last active ADMIN of the organization.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/members/8e4b9f5d-1c6a-4d0b-8f4e-5a7c9d1b3f46/deactivate'
+                    code: LAST_ADMIN
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      activeAdminCount: 1
+        '422':
+          description: '`effectiveAt` is earlier than now minus 5 min. Code: `EFFECTIVE_DATE_IN_PAST`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                effectiveDateInPast:
+                  summary: The deactivation date is in the past
+                  description: |-
+                    **Cause:** At 11:00 on 2026-11-09, Andrii Shevchenko sends `"effectiveAt": "2026-11-09T10:00:00+02:00"`, 1 h in the past.
+
+                    **Client reaction:** Show the message next to the effectiveAt field.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/effective-date-in-past'
+                    title: Effective date in the past
+                    status: 422
+                    detail: The deactivation cannot start in the past.
+                    instance: '/api/v1/orgs/0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e/members/6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24/deactivate'
+                    code: EFFECTIVE_DATE_IN_PAST
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /effectiveAt
+                        code: IN_THE_PAST
+                        message: Must not be earlier than now minus 5 min.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /locations/{locationId}/schedules:
+    post:
+      operationId: createSchedule
+      x-api-id: API-04
+      x-service: Scheduling service (`scheduling-service`)
+      x-requirements: [REQ-FUNC-006]
+      x-concurrency: []
+      tags: [Scheduling]
+      summary: 'API-04: Create a weekly draft schedule'
+      description: |-
+        Creates an empty `DRAFT` schedule for one location and one week. The week starts on Monday
+        at 00:00 in the time zone of the location. A location has one schedule per week.
+
+        **Roles:** MANAGER (own locations), ADMIN.
+
+        **Concurrency:** None. The `Idempotency-Key` header is optional (CS-4). Without a key, a second request returns 409 `SCHEDULE_ALREADY_EXISTS`.
+
+        **Requirements:** REQ-FUNC-006.
+
+        **API ID:** `x-api-id: API-04`.
+      parameters:
+        - $ref: '#/components/parameters/LocationId'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateScheduleRequest'
+            examples:
+              weekOfNovember2:
+                summary: Iryna Bondar creates the schedule for the week of 2026-11-02
+                value:
+                  weekStart: '2026-11-02'
+      responses:
+        '201':
+          description: The draft schedule is created.
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+              examples:
+                scheduleCreated:
+                  summary: An empty draft schedule
+                  value:
+                    id: 'c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f'
+                    locationId: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+                    weekStart: '2026-11-02'
+                    status: DRAFT
+                    version: 1
+                    shifts: []
+                    createdAt: '2026-10-29T09:00:00+02:00'
+        '400':
+          description: 'The body does not agree with the schema. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The date has a wrong format
+                  description: |-
+                    **Cause:** Iryna Bondar sends `"weekStart": "02.11.2026"`.
+
+                    **Client reaction:** Show the message next to the week field and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/schedules'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /weekStart
+                        code: INVALID_FORMAT
+                        message: Must be a date in the format YYYY-MM-DD.
+        '403':
+          description: 'The caller cannot create schedules for this location. Codes: `ROLE_NOT_ALLOWED`, `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                roleNotAllowed:
+                  summary: An employee tries to create a schedule
+                  description: |-
+                    **Cause:** Olena Kovalenko (EMPLOYEE) sends the request.
+
+                    **Client reaction:** Hide the Create schedule action for employees and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/role-not-allowed'
+                    title: Role not allowed
+                    status: 403
+                    detail: The role EMPLOYEE cannot create schedules.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/schedules'
+                    code: ROLE_NOT_ALLOWED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                locationScopeDenied:
+                  summary: The location is not in the scope of the manager
+                  description: |-
+                    **Cause:** A manager of another location of Lviv Coffee Co. sends the request for Rynok Square.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and show only the locations from it.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/schedules'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The location is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The location is in another organization
+                  description: |-
+                    **Cause:** A manager of another organization sends the request for Rynok Square. Tenant isolation hides the location.
+
+                    **Client reaction:** Remove the stale location, reload the list of locations and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a was not found.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/schedules'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Location
+                      id: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+        '409':
+          description: 'A schedule for this location and week exists. Code: `SCHEDULE_ALREADY_EXISTS`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                scheduleAlreadyExists:
+                  summary: The schedule for this week exists
+                  description: |-
+                    **Cause:** Iryna Bondar and Andrii Shevchenko both create the schedule for the week of 2026-11-02. Andrii was first.
+
+                    **Client reaction:** Open the existing schedule from `currentState.scheduleId`.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/schedule-already-exists'
+                    title: Schedule already exists
+                    status: 409
+                    detail: A schedule for location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a and the week of 2026-11-02 exists.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/schedules'
+                    code: SCHEDULE_ALREADY_EXISTS
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      scheduleId: 'c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f'
+                      status: DRAFT
+                      version: 1
+        '422':
+          description: '`weekStart` is not a Monday in the time zone of the location, or is in the past. Code: `INVALID_WEEK_START`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                invalidWeekStart:
+                  summary: The week does not start on a Monday
+                  description: |-
+                    **Cause:** Iryna Bondar sends `"weekStart": "2026-11-03"`, a Tuesday.
+
+                    **Client reaction:** Show the message next to the week field.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invalid-week-start'
+                    title: Invalid week start
+                    status: 422
+                    detail: weekStart must be a Monday in the time zone of the location (Europe/Kyiv).
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/schedules'
+                    code: INVALID_WEEK_START
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /weekStart
+                        code: NOT_A_MONDAY
+                        message: 2026-11-03 is a Tuesday. Use a Monday.
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /shifts/{shiftId}:
+    patch:
+      operationId: updateShift
+      x-api-id: API-05
+      x-service: Scheduling service (`scheduling-service`)
+      x-requirements: [REQ-FUNC-007, REQ-FUNC-016]
+      x-concurrency: [CS-2]
+      tags: [Scheduling]
+      summary: 'API-05: Change a shift'
+      description: |-
+        Changes one shift. The body has the `version` that the client read and one or more fields to
+        change. The server applies the change only when `version` is the current version of the shift
+        (`UPDATE … WHERE id = $1 AND version = $2`). Each change increments the version of the shift
+        and of its schedule. The server checks the labor rules again for all assigned employees.
+
+        A shift of a published schedule can change until the shift starts. Each change of a published
+        shift emits `ShiftChanged`, and the assigned employees get a notification.
+
+        **Roles:** MANAGER (own locations), ADMIN.
+
+        **Concurrency:** CS-2 (optimistic concurrency control with `version`).
+
+        **Requirements:** REQ-FUNC-007, REQ-FUNC-016.
+
+        **API ID:** `x-api-id: API-05`.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateShiftRequest'
+            examples:
+              increaseCapacity:
+                summary: Iryna Bondar adds a third barista to the Saturday shift
+                value:
+                  version: 3
+                  capacity: 3
+      responses:
+        '200':
+          description: The shift is changed. `version` is incremented.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shift'
+              examples:
+                shiftUpdated:
+                  summary: The changed shift
+                  value:
+                    id: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    scheduleId: 'c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f'
+                    locationId: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+                    positionId: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
+                    startsAt: '2026-11-07T08:00:00+02:00'
+                    endsAt: '2026-11-07T16:00:00+02:00'
+                    capacity: 3
+                    assignedCount: 2
+                    openSlots: 1
+                    note: null
+                    version: 4
+                    updatedAt: '2026-10-30T12:12:00+02:00'
+        '400':
+          description: 'The body does not agree with the schema. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The version is missing
+                  description: |-
+                    **Cause:** The SPA sends `{"capacity": 3}` without `version`.
+
+                    **Client reaction:** This is a bug in the client: log it, show a generic error and always send the version that the form read.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /version
+                        code: REQUIRED
+                        message: Is required.
+        '403':
+          description: 'The location of the shift is not in the scope of the caller. Code: `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                locationScopeDenied:
+                  summary: The shift is at a location of another manager
+                  description: |-
+                    **Cause:** A manager of another location of Lviv Coffee Co. changes the Rynok Square shift.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and refresh the view.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The shift is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The shift is in another organization
+                  description: |-
+                    **Cause:** A manager of another organization sends the request. Tenant isolation hides the shift.
+
+                    **Client reaction:** Remove the stale shift, reload the schedule and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Shift d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80 was not found.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Shift
+                      id: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+        '409':
+          description: 'The shift changed, or its state blocks the change. Codes: `VERSION_CONFLICT`, `CAPACITY_BELOW_ASSIGNED`, `SHIFT_ALREADY_STARTED`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/VersionConflictProblem'
+                  - $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                versionConflict:
+                  summary: Another manager changed the shift first
+                  description: |-
+                    **Cause:** Iryna Bondar sends a note with `version` 3. Andrii Shevchenko saved a note on the same shift a moment before her, so the version is 4 now (CS-2).
+
+                    **Client reaction:** Reload the shift, show what changed and let the user apply the change again with version 4.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/version-conflict'
+                    title: Version conflict
+                    status: 409
+                    detail: Shift d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80 has version 4. Your change is based on version 3.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: VERSION_CONFLICT
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentVersion: 4
+                capacityBelowAssigned:
+                  summary: The new capacity is less than the assigned count
+                  description: |-
+                    **Cause:** Iryna Bondar sends `{"version": 3, "capacity": 1}`. Two employees are assigned to the shift.
+
+                    **Client reaction:** Show the assigned count; the manager must remove assignments first.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/capacity-below-assigned'
+                    title: Capacity below assigned count
+                    status: 409
+                    detail: The shift has 2 assigned employees. The capacity cannot be 1.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: CAPACITY_BELOW_ASSIGNED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      capacity: 2
+                      assignedCount: 2
+                shiftAlreadyStarted:
+                  summary: The shift started already
+                  description: |-
+                    **Cause:** Iryna Bondar sends the change on 2026-11-07 at 08:30, after the shift start.
+
+                    **Client reaction:** Reload the shift; the change is not possible any more.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/shift-already-started'
+                    title: Shift already started
+                    status: 409
+                    detail: The shift started at 2026-11-07T08:00:00+02:00. You cannot change it now.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: SHIFT_ALREADY_STARTED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      startsAt: '2026-11-07T08:00:00+02:00'
+        '422':
+          description: 'The change breaks a time rule or a labor rule. Codes: `INVALID_TIME_RANGE`, `LABOR_RULE_VIOLATION` (`overridable` is always false here).'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/ValidationProblem'
+                  - $ref: '#/components/schemas/LaborRuleProblem'
+              examples:
+                invalidTimeRange:
+                  summary: The end is not after the start
+                  description: |-
+                    **Cause:** Iryna Bondar sends `{"version": 3, "endsAt": "2026-11-07T07:00:00+02:00"}`.
+
+                    **Client reaction:** Show the message next to the end time field.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invalid-time-range'
+                    title: Invalid time range
+                    status: 422
+                    detail: endsAt must be later than startsAt.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: INVALID_TIME_RANGE
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /endsAt
+                        code: END_NOT_AFTER_START
+                        message: Must be later than startsAt 2026-11-07T08:00:00+02:00.
+                laborRuleViolation:
+                  summary: The new start time breaks the minimum rest of an assigned employee
+                  description: |-
+                    **Cause:** Iryna Bondar sends `{"version": 3, "startsAt": "2026-11-07T06:00:00+02:00"}`. Taras Melnyk is assigned to the shift and works until 20:00 on Friday, so his rest becomes 10 h.
+
+                    **Client reaction:** Show each violation; the manager must reassign the employee or choose another time, because an override is not possible here.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/labor-rule-violation'
+                    title: Labor rule violation
+                    status: 422
+                    detail: The change breaks 1 labor rule for an assigned employee.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    code: LABOR_RULE_VIOLATION
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    violations:
+                      - rule: MIN_REST
+                        limit: 11
+                        actual: 10
+                        unit: HOURS
+                        employeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                        conflictingAssignmentId: 'f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102'
+                    overridable: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /schedules/{scheduleId}/publish:
+    post:
+      operationId: publishSchedule
+      x-api-id: API-06
+      x-service: Scheduling service (`scheduling-service`)
+      x-requirements: [REQ-FUNC-008]
+      x-concurrency: [CS-2, CS-5]
+      tags: [Scheduling]
+      summary: 'API-06: Publish a schedule'
+      description: |-
+        Publishes a draft schedule. The server checks `version` (CS-2) and validates all shifts. In the
+        same transaction, it writes the event `SchedulePublished` to the outbox (CS-5). The Notification
+        service then informs all employees of the location. Publication is one way: a published schedule
+        cannot go back to `DRAFT`. If the outbox write fails, the transaction rolls back and the server
+        returns 503 `SERVICE_UNAVAILABLE`.
+
+        **Roles:** MANAGER (own locations), ADMIN.
+
+        **Concurrency:** CS-2 (optimistic concurrency control with `version`), CS-5 (transactional outbox and Kafka).
+
+        **Requirements:** REQ-FUNC-008.
+
+        **API ID:** `x-api-id: API-06`.
+      parameters:
+        - $ref: '#/components/parameters/ScheduleId'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishScheduleRequest'
+            examples:
+              publishVersion12:
+                summary: Iryna Bondar publishes the version that she reviewed
+                value:
+                  version: 12
+      responses:
+        '200':
+          description: The schedule is published. The response shows one of the shifts.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+              examples:
+                schedulePublished:
+                  summary: The published schedule (one shift shown)
+                  value:
+                    id: 'c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f'
+                    locationId: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+                    weekStart: '2026-11-02'
+                    status: PUBLISHED
+                    version: 13
+                    shifts:
+                      - id: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                        scheduleId: 'c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f'
+                        locationId: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+                        positionId: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
+                        startsAt: '2026-11-07T08:00:00+02:00'
+                        endsAt: '2026-11-07T16:00:00+02:00'
+                        capacity: 2
+                        assignedCount: 1
+                        openSlots: 1
+                        note: Bean delivery at 07:30. Open the back door. Latte art training at 09:00.
+                        version: 5
+                        updatedAt: '2026-10-29T16:20:00+02:00'
+                    createdAt: '2026-10-29T09:00:00+02:00'
+                    publishedAt: '2026-10-29T18:00:00+02:00'
+        '400':
+          description: 'The body does not agree with the schema. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The version is a string
+                  description: |-
+                    **Cause:** The SPA sends `{"version": "12"}`.
+
+                    **Client reaction:** This is a bug in the client: log it, show a generic error and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: '/api/v1/schedules/c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/publish'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /version
+                        code: INVALID_TYPE
+                        message: Must be an integer.
+        '403':
+          description: 'The location of the schedule is not in the scope of the caller. Code: `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                locationScopeDenied:
+                  summary: The schedule is at a location of another manager
+                  description: |-
+                    **Cause:** A manager of another location of Lviv Coffee Co. publishes the Rynok Square schedule.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and refresh the view.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/schedules/c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/publish'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The schedule is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The schedule is in another organization
+                  description: |-
+                    **Cause:** A manager of another organization sends the request. Tenant isolation hides the schedule.
+
+                    **Client reaction:** Remove the stale schedule, reload the list of schedules and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Schedule c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f was not found.
+                    instance: '/api/v1/schedules/c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/publish'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Schedule
+                      id: 'c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f'
+        '409':
+          description: 'The schedule changed, or it is published already. Codes: `VERSION_CONFLICT`, `SCHEDULE_ALREADY_PUBLISHED`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/VersionConflictProblem'
+                  - $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                versionConflict:
+                  summary: Another manager changed the schedule after the review
+                  description: |-
+                    **Cause:** Iryna Bondar sends `{"version": 11}`, the version that she reviewed. Then Andrii Shevchenko changed the capacity of the Sunday shift, so the version is 12 now (CS-2).
+
+                    **Client reaction:** Reload the schedule, mark the changed shifts and ask the user to confirm the publication again with version 12.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/version-conflict'
+                    title: Version conflict
+                    status: 409
+                    detail: Schedule c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f has version 12. You reviewed version 11.
+                    instance: '/api/v1/schedules/c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/publish'
+                    code: VERSION_CONFLICT
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentVersion: 12
+                scheduleAlreadyPublished:
+                  summary: The schedule is published already
+                  description: |-
+                    **Cause:** Andrii Shevchenko published the schedule a short time before Iryna Bondar.
+
+                    **Client reaction:** Reload the schedule; no action is necessary.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/schedule-already-published'
+                    title: Schedule already published
+                    status: 409
+                    detail: Schedule c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f was published at 2026-10-29T18:00:00+02:00.
+                    instance: '/api/v1/schedules/c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/publish'
+                    code: SCHEDULE_ALREADY_PUBLISHED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      status: PUBLISHED
+                      publishedAt: '2026-10-29T18:00:00+02:00'
+                      version: 13
+        '422':
+          description: 'The schedule has no shifts or has shifts that are not valid. Code: `SCHEDULE_NOT_PUBLISHABLE`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                scheduleNotPublishable:
+                  summary: The schedule has no shifts
+                  description: |-
+                    **Cause:** Iryna Bondar publishes a schedule without shifts. The `pointer` refers to the schedule resource, not to the request body.
+
+                    **Client reaction:** Show the list of problems and open the schedule editor at each pointer.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/schedule-not-publishable'
+                    title: Schedule not publishable
+                    status: 422
+                    detail: The schedule cannot be published. It has 1 problem.
+                    instance: '/api/v1/schedules/c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/publish'
+                    code: SCHEDULE_NOT_PUBLISHABLE
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /shifts
+                        code: NO_SHIFTS
+                        message: The schedule has no shifts. Add one shift or more.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /shifts/{shiftId}/assignments:
+    post:
+      operationId: assignEmployee
+      x-api-id: API-07
+      x-service: Scheduling service (`scheduling-service`)
+      x-requirements: [REQ-FUNC-009, REQ-FUNC-016]
+      x-concurrency: [CS-1]
+      tags: [Scheduling]
+      summary: 'API-07: Assign an employee to a shift'
+      description: |-
+        A manager assigns an employee to a shift. The Scheduling service locks the shift row and then
+        the employee-week row (`SELECT … FOR UPDATE`, fixed lock order). Then it checks capacity,
+        overlaps, qualification and labor rules, and inserts the assignment. A PostgreSQL exclusion
+        constraint on the employee and the time range is the last defense against overlaps.
+
+        A manager can accept a labor rule violation: send the request again with `override.reason`.
+        The override goes to the audit log, and the assignment gets `overridden: true`.
+
+        **Roles:** MANAGER (own locations), ADMIN.
+
+        **Concurrency:** CS-1 (pessimistic locking and exclusion constraint).
+
+        **Requirements:** REQ-FUNC-009, REQ-FUNC-016.
+
+        **API ID:** `x-api-id: API-07`.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignEmployeeRequest'
+            examples:
+              assign:
+                summary: Iryna Bondar assigns Olena Kovalenko
+                value:
+                  employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+              assignWithOverride:
+                summary: Iryna Bondar assigns Olena Kovalenko and overrides the maximum weekly hours
+                value:
+                  employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                  override:
+                    reason: Two baristas are sick and Olena agreed
+      responses:
+        '201':
+          description: The assignment is created.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+              examples:
+                assignmentCreated:
+                  summary: The new assignment without a violation
+                  value:
+                    id: '8f9a0b1c-2d3e-4f4a-9b5c-6d7e8f9a0b1c'
+                    shiftId: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    status: ACTIVE
+                    source: MANAGER
+                    overridden: false
+                    tradeLock: null
+                    createdAt: '2026-10-29T17:20:00+02:00'
+                assignmentCreatedWithOverride:
+                  summary: The new assignment after an override
+                  value:
+                    id: '8f9a0b1c-2d3e-4f4a-9b5c-6d7e8f9a0b1c'
+                    shiftId: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    status: ACTIVE
+                    source: MANAGER
+                    overridden: true
+                    tradeLock: null
+                    createdAt: '2026-10-29T17:20:00+02:00'
+        '400':
+          description: 'The body does not agree with the schema. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The override reason is too short
+                  description: |-
+                    **Cause:** Iryna Bondar sends `"override": {"reason": "ok"}`.
+
+                    **Client reaction:** Show the message next to the reason field and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /override/reason
+                        code: TOO_SHORT
+                        message: Must have 10 to 500 characters.
+        '403':
+          description: 'The location of the shift is not in the scope of the caller. Code: `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                locationScopeDenied:
+                  summary: The shift is at a location of another manager
+                  description: |-
+                    **Cause:** A manager of another location of Lviv Coffee Co. assigns an employee to the Rynok Square shift.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and refresh the view.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The shift or the employee is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The employee is not a member of the organization
+                  description: |-
+                    **Cause:** Iryna Bondar sends an `employeeId` that is not a member of Lviv Coffee Co. An unknown shift gives the same code with `resource.type` = `Shift`.
+
+                    **Client reaction:** Remove the stale employee from the list, reload the list and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Member 2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d was not found.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Member
+                      id: '2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d'
+        '409':
+          description: 'The shift is full, or the employee has a conflicting assignment. Codes: `SLOT_FILLED`, `ASSIGNMENT_OVERLAP`, `ALREADY_ASSIGNED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                slotFilled:
+                  summary: No open slot is left
+                  description: |-
+                    **Cause:** An employee claimed the last slot while Iryna Bondar filled in the form.
+
+                    **Client reaction:** Reload the shift, show that it is full and offer to increase the capacity.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/slot-filled'
+                    title: No open slot
+                    status: 409
+                    detail: Shift d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80 has no open slot. All 2 slots are filled.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: SLOT_FILLED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      capacity: 2
+                      assignedCount: 2
+                      openSlots: 0
+                assignmentOverlap:
+                  summary: The employee has an overlapping assignment
+                  description: |-
+                    **Cause:** Iryna Bondar assigns Olena Kovalenko. Olena already works from 12:00 to 20:00 on 2026-11-07.
+
+                    **Client reaction:** Show the conflicting assignment from `currentState` and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/assignment-overlap'
+                    title: Overlapping assignment
+                    status: 409
+                    detail: Employee 5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13 has an active assignment from 12:00 to 20:00 on 2026-11-07.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: ASSIGNMENT_OVERLAP
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      conflictingAssignmentId: '4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f70'
+                      startsAt: '2026-11-07T12:00:00+02:00'
+                      endsAt: '2026-11-07T20:00:00+02:00'
+                alreadyAssigned:
+                  summary: The employee is on this shift already
+                  description: |-
+                    **Cause:** Iryna Bondar assigns Olena Kovalenko, who claimed this shift before.
+
+                    **Client reaction:** Reload the shift; no action is necessary.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/already-assigned'
+                    title: Employee already assigned
+                    status: 409
+                    detail: Employee 5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13 is already assigned to this shift.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: ALREADY_ASSIGNED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      assignmentId: '9c0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f'
+                      employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+        '422':
+          description: 'The assignment breaks a labor rule or a qualification rule. Codes: `LABOR_RULE_VIOLATION` (`overridable` is true for the manager), `POSITION_NOT_QUALIFIED`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/LaborRuleProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                laborRuleViolation:
+                  summary: The weekly hours are too high and the manager can override
+                  description: |-
+                    **Cause:** Iryna Bondar assigns Olena Kovalenko without an override. Olena has 36 h in the week of 2026-11-02, and the Saturday shift adds 8 h.
+
+                    **Client reaction:** Show each violation and offer "Override" with a reason; the next request has `override.reason`.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/labor-rule-violation'
+                    title: Labor rule violation
+                    status: 422
+                    detail: The assignment breaks 1 labor rule. You can override it with a reason.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: LABOR_RULE_VIOLATION
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    violations:
+                      - rule: MAX_WEEKLY_HOURS
+                        limit: 40
+                        actual: 44
+                        unit: HOURS
+                        employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    overridable: true
+                positionNotQualified:
+                  summary: The employee is not qualified for the position
+                  description: |-
+                    **Cause:** Iryna Bondar assigns a cashier who does not have the position Barista.
+
+                    **Client reaction:** Show the message, let the manager choose a qualified employee and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/position-not-qualified'
+                    title: Employee not qualified for the position
+                    status: 422
+                    detail: Employee 9f5c0a6e-2d7b-4e1c-8a5f-6b8d0e2c4a57 is not qualified for the position Barista.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/assignments'
+                    code: POSITION_NOT_QUALIFIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /shifts/{shiftId}/claims:
+    post:
+      operationId: claimShift
+      x-api-id: API-08
+      x-service: Scheduling service (`scheduling-service`)
+      x-requirements: [REQ-FUNC-010, REQ-FUNC-016]
+      x-concurrency: [CS-1, CS-4]
+      tags: [Scheduling]
+      summary: 'API-08: Claim an open shift'
+      description: |-
+        An employee claims an open slot of a published shift. No approval is necessary. The request
+        has no body: the caller is the employee from the access token.
+
+        Two employees can claim the last slot at the same time. The Scheduling service locks the shift
+        row and then the employee-week row (`SELECT … FOR UPDATE`), so only one claim wins (CS-1). The
+        `Idempotency-Key` header is required. A retry after a timeout returns the stored response with
+        `Idempotent-Replayed: true` and does not create a second assignment (CS-4).
+
+        **Roles:** EMPLOYEE (own locations, qualified positions).
+
+        **Concurrency:** CS-1 (pessimistic locking and exclusion constraint), CS-4 (idempotency key).
+
+        **Requirements:** REQ-FUNC-010, REQ-FUNC-016.
+
+        **API ID:** `x-api-id: API-08`.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+        - $ref: '#/components/parameters/Traceparent'
+      responses:
+        '201':
+          description: The claim is accepted and the assignment is created. A replay returns the same body with `Idempotent-Replayed`.
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+              examples:
+                shiftClaimed:
+                  summary: Olena Kovalenko has the slot
+                  value:
+                    id: '9c0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f'
+                    shiftId: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+                    employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    status: ACTIVE
+                    source: CLAIM
+                    overridden: false
+                    tradeLock: null
+                    createdAt: '2026-11-03T09:14:03+02:00'
+        '400':
+          description: 'The `Idempotency-Key` header is missing. Code: `IDEMPOTENCY_KEY_MISSING`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                idempotencyKeyMissing:
+                  summary: The request has no idempotency key
+                  description: |-
+                    **Cause:** A new version of the SPA forgot to add the `Idempotency-Key` header.
+
+                    **Client reaction:** This is a bug in the client: generate a UUID key and send the request again.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/idempotency-key-missing'
+                    title: Idempotency key missing
+                    status: 400
+                    detail: The header Idempotency-Key is required for this operation.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: IDEMPOTENCY_KEY_MISSING
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '403':
+          description: 'The location of the shift is not one of the locations of the employee. Code: `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                locationScopeDenied:
+                  summary: The shift is at another location
+                  description: |-
+                    **Cause:** An employee of another location of Lviv Coffee Co. claims the Rynok Square shift.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and show only shifts of own locations.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The shift does not exist, is in another organization, or is not published yet. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The shift is in a draft schedule
+                  description: |-
+                    **Cause:** Olena Kovalenko claims the shift before Iryna Bondar publishes the schedule. Employees cannot see draft shifts.
+
+                    **Client reaction:** Remove the stale shift, reload the list of open shifts and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Shift d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80 was not found.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Shift
+                      id: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+        '409':
+          description: 'The state of the shift or of the employee blocks the claim, or the same key is in progress. Codes: `SLOT_FILLED`, `ASSIGNMENT_OVERLAP`, `SHIFT_ALREADY_STARTED`, `IDEMPOTENCY_REQUEST_IN_PROGRESS`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/ConflictProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                slotFilled:
+                  summary: Another employee took the last slot
+                  description: |-
+                    **Cause:** Olena Kovalenko and Taras Melnyk claim the last slot at the same time (CS-1). Olena gets the row lock first. Taras gets this response.
+
+                    **Client reaction:** Reload the shift, show "Taken" and offer other open shifts.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/slot-filled'
+                    title: No open slot
+                    status: 409
+                    detail: Shift d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80 has no open slot. Another employee took the last slot.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: SLOT_FILLED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      capacity: 2
+                      assignedCount: 2
+                      openSlots: 0
+                assignmentOverlap:
+                  summary: The employee has an overlapping assignment
+                  description: |-
+                    **Cause:** Olena Kovalenko already works from 12:00 to 20:00 on 2026-11-07.
+
+                    **Client reaction:** Show the conflicting assignment from `currentState` and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/assignment-overlap'
+                    title: Overlapping assignment
+                    status: 409
+                    detail: You have an active assignment from 12:00 to 20:00 on 2026-11-07.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: ASSIGNMENT_OVERLAP
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      conflictingAssignmentId: '4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f70'
+                      startsAt: '2026-11-07T12:00:00+02:00'
+                      endsAt: '2026-11-07T20:00:00+02:00'
+                shiftAlreadyStarted:
+                  summary: The shift started already
+                  description: |-
+                    **Cause:** Olena Kovalenko claims the shift at 08:05 on 2026-11-07, after the shift start.
+
+                    **Client reaction:** Reload the list; the claim is not possible any more.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/shift-already-started'
+                    title: Shift already started
+                    status: 409
+                    detail: The shift started at 2026-11-07T08:00:00+02:00.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: SHIFT_ALREADY_STARTED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      startsAt: '2026-11-07T08:00:00+02:00'
+                idempotencyRequestInProgress:
+                  summary: The first request with the same key still runs
+                  description: |-
+                    **Cause:** The first claim timed out in the SPA after 15 s. The SPA retries with the same key while the server still processes the first request.
+
+                    **Client reaction:** Wait 1 s and send the request again with the SAME key (max 3 times).
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/idempotency-request-in-progress'
+                    title: Request in progress
+                    status: 409
+                    detail: A request with the idempotency key 0f8d6c1e-3b5a-4e7d-9c2b-6a4f8e1d3c57 is still in progress.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: IDEMPOTENCY_REQUEST_IN_PROGRESS
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '422':
+          description: 'The claim breaks a rule, or the key was used for another request. Codes: `LABOR_RULE_VIOLATION` (`overridable` is always false here), `POSITION_NOT_QUALIFIED`, `IDEMPOTENCY_KEY_REUSED`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/LaborRuleProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                laborRuleViolation:
+                  summary: The minimum rest is too short
+                  description: |-
+                    **Cause:** Olena Kovalenko claims the shift. She works on Friday until 24:00 (`2026-11-07T00:00:00+02:00`), so her rest before 08:00 on Saturday is 8 h.
+
+                    **Client reaction:** Show each violation and suggest another shift, because employees cannot override.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/labor-rule-violation'
+                    title: Labor rule violation
+                    status: 422
+                    detail: The claim breaks 1 labor rule.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: LABOR_RULE_VIOLATION
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    violations:
+                      - rule: MIN_REST
+                        limit: 11
+                        actual: 8
+                        unit: HOURS
+                        employeeId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                        conflictingAssignmentId: '3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b'
+                    overridable: false
+                positionNotQualified:
+                  summary: The employee is not qualified for the position
+                  description: |-
+                    **Cause:** A cashier of Rynok Square claims the Barista shift from a list that is not current.
+
+                    **Client reaction:** Show the message and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/position-not-qualified'
+                    title: Employee not qualified for the position
+                    status: 422
+                    detail: You are not qualified for the position Barista.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: POSITION_NOT_QUALIFIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                idempotencyKeyReused:
+                  summary: The key belongs to another request
+                  description: |-
+                    **Cause:** The SPA sends the key 0f8d6c1e-3b5a-4e7d-9c2b-6a4f8e1d3c57 again for a claim of another shift.
+
+                    **Client reaction:** This is a bug in the client: generate a new key for each new user action.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/idempotency-key-reused'
+                    title: Idempotency key reused
+                    status: 422
+                    detail: The idempotency key 0f8d6c1e-3b5a-4e7d-9c2b-6a4f8e1d3c57 belongs to a different request.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: IDEMPOTENCY_KEY_REUSED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '429':
+          description: 'The `claims` rate limit policy is empty (10 requests per 60 s). Code: `RATE_LIMITED`.'
+          headers:
+            Retry-After:
+              description: Seconds to wait. The same value as `retryAfterSeconds`.
+              schema:
+                type: integer
+                minimum: 0
+              example: 17
+            RateLimit-Policy:
+              description: The policy of the operation. `q` is the quota, `w` is the window in seconds.
+              schema:
+                type: string
+              example: '"claims";q=10;w=60'
+            RateLimit:
+              description: The state of the policy. `r` is the remaining quota, `t` is the seconds until a reset.
+              schema:
+                type: string
+              example: '"claims";r=0;t=17'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/RateLimitProblem'
+              examples:
+                rateLimited:
+                  summary: Too many claims in 60 s
+                  description: |-
+                    **Cause:** Olena Kovalenko taps "Claim" on many open shifts. She sends 10 claims in 60 s.
+
+                    **Client reaction:** Disable the Claim buttons with a countdown of `Retry-After` seconds, then retry with exponential backoff and jitter.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/rate-limited'
+                    title: Too many requests
+                    status: 429
+                    detail: You sent 10 claim requests in 60 s. Wait 17 s.
+                    instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                    code: RATE_LIMITED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    retryAfterSeconds: 17
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /trade-requests:
+    post:
+      operationId: createTradeRequest
+      x-api-id: API-09
+      x-service: Trade service (`trade-service`)
+      x-requirements: [REQ-FUNC-011, REQ-FUNC-012]
+      x-concurrency: [CS-3, CS-4]
+      tags: [Trades]
+      summary: 'API-09: Create a trade request (swap or cover)'
+      description: |-
+        An employee creates a trade request for an own active assignment. A `SWAP` exchanges the
+        assignment with the assignment of a colleague. A `COVER` gives the assignment to a colleague.
+        A `COVER` without `targetEmployeeId` is open to all qualified colleagues of the location.
+
+        The Trade service starts the trade saga (CS-3). It calls the Scheduling service to verify the
+        assignment and to place a trade lock on the offered assignment. The trade request expires 48 h
+        after creation or at the trade cutoff (24 h before the shift start), whichever is earlier. The
+        `Idempotency-Key` header is required (CS-4).
+
+        **Roles:** EMPLOYEE (own active assignments).
+
+        **Concurrency:** CS-3 (orchestrated saga and trade lock), CS-4 (idempotency key).
+
+        **Requirements:** REQ-FUNC-011, REQ-FUNC-012.
+
+        **API ID:** `x-api-id: API-09`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTradeRequestRequest'
+            examples:
+              swap:
+                summary: Olena Kovalenko asks Taras Melnyk to swap the Thursday shift for his Friday shift
+                value:
+                  type: SWAP
+                  offeredAssignmentId: 'e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091'
+                  requestedAssignmentId: 'f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102'
+                  message: Can we swap? I have a doctor appointment on Thursday morning.
+              cover:
+                summary: Olena Kovalenko asks Taras Melnyk to cover the Thursday shift
+                value:
+                  type: COVER
+                  offeredAssignmentId: 'e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091'
+                  targetEmployeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                  message: Can you take my Thursday shift?
+      responses:
+        '201':
+          description: The trade request is created and waits for the colleague. A replay returns the same body with `Idempotent-Replayed`.
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeRequest'
+              examples:
+                swapCreated:
+                  summary: The new swap request
+                  value:
+                    id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+                    type: SWAP
+                    status: PENDING_PEER
+                    requesterId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    offeredAssignmentId: 'e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091'
+                    requestedAssignmentId: 'f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102'
+                    targetEmployeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    acceptedBy: null
+                    message: Can we swap? I have a doctor appointment on Thursday morning.
+                    expiresAt: '2026-11-04T08:00:00+02:00'
+                    createdAt: '2026-11-02T10:00:00+02:00'
+                    version: 1
+        '400':
+          description: 'The body does not agree with the schema, or the key is missing. Codes: `VALIDATION_FAILED`, `IDEMPOTENCY_KEY_MISSING`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/ValidationProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                validationFailed:
+                  summary: A swap without the requested assignment
+                  description: |-
+                    **Cause:** Olena Kovalenko sends `{"type": "SWAP", "offeredAssignmentId": "e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091"}`.
+
+                    **Client reaction:** Show the message next to the field of the colleague's shift and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: /api/v1/trade-requests
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /requestedAssignmentId
+                        code: REQUIRED
+                        message: Is required when type is SWAP.
+                idempotencyKeyMissing:
+                  summary: The request has no idempotency key
+                  description: |-
+                    **Cause:** The SPA sends the request without the `Idempotency-Key` header.
+
+                    **Client reaction:** This is a bug in the client: generate a UUID key and send the request again.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/idempotency-key-missing'
+                    title: Idempotency key missing
+                    status: 400
+                    detail: The header Idempotency-Key is required for this operation.
+                    instance: /api/v1/trade-requests
+                    code: IDEMPOTENCY_KEY_MISSING
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '403':
+          description: 'The caller does not own the offered assignment. Code: `NOT_RESOURCE_OWNER`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                notResourceOwner:
+                  summary: The offered assignment belongs to another employee
+                  description: |-
+                    **Cause:** Olena Kovalenko sends the assignment of Taras Melnyk as `offeredAssignmentId`.
+
+                    **Client reaction:** Do not retry and refresh the list of own assignments.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/not-resource-owner'
+                    title: Not the resource owner
+                    status: 403
+                    detail: You do not own assignment f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102.
+                    instance: /api/v1/trade-requests
+                    code: NOT_RESOURCE_OWNER
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'An assignment in the body is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The requested assignment does not exist
+                  description: |-
+                    **Cause:** Olena Kovalenko sends a `requestedAssignmentId` that does not exist in Lviv Coffee Co.
+
+                    **Client reaction:** Remove the stale assignment, reload the schedule and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Assignment b8c9d0e1-f2a3-4b4c-9d5e-6f7a8b9c0d1e was not found.
+                    instance: /api/v1/trade-requests
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Assignment
+                      id: 'b8c9d0e1-f2a3-4b4c-9d5e-6f7a8b9c0d1e'
+        '409':
+          description: 'The assignment has a trade lock, or the same key is in progress. Codes: `ASSIGNMENT_LOCKED`, `IDEMPOTENCY_REQUEST_IN_PROGRESS`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/ConflictProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                assignmentLocked:
+                  summary: The offered assignment is in another pending trade request
+                  description: |-
+                    **Cause:** Olena Kovalenko creates a cover request for the Thursday shift. Her swap request for the same assignment is still pending.
+
+                    **Client reaction:** Show the pending trade request from `currentState.tradeLock` and retry after it closes.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/assignment-locked'
+                    title: Assignment locked by a trade request
+                    status: 409
+                    detail: Assignment e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091 has a trade lock of the pending trade request 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e.
+                    instance: /api/v1/trade-requests
+                    code: ASSIGNMENT_LOCKED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      assignmentId: 'e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091'
+                      tradeLock: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+                idempotencyRequestInProgress:
+                  summary: The first request with the same key still runs
+                  description: |-
+                    **Cause:** The SPA retries after a timeout while the Trade service still waits for the Scheduling service.
+
+                    **Client reaction:** Wait 1 s and send the request again with the SAME key (max 3 times).
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/idempotency-request-in-progress'
+                    title: Request in progress
+                    status: 409
+                    detail: A request with the idempotency key 0f8d6c1e-3b5a-4e7d-9c2b-6a4f8e1d3c57 is still in progress.
+                    instance: /api/v1/trade-requests
+                    code: IDEMPOTENCY_REQUEST_IN_PROGRESS
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '422':
+          description: 'The trade breaks a trade rule, or the key was used for another request. Codes: `TRADE_CUTOFF_PASSED`, `TRADE_POSITION_MISMATCH`, `INVALID_TRADE_TARGET`, `IDEMPOTENCY_KEY_REUSED`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/ValidationProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                tradeCutoffPassed:
+                  summary: The shift starts in less than 24 h
+                  description: |-
+                    **Cause:** Olena Kovalenko creates the request at 10:00 on 2026-11-04. Her shift starts at 08:00 on 2026-11-05.
+
+                    **Client reaction:** Tell the user to contact the manager.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/trade-cutoff-passed'
+                    title: Trade cutoff passed
+                    status: 422
+                    detail: The shift starts at 2026-11-05T08:00:00+02:00. The trade cutoff was 2026-11-04T08:00:00+02:00.
+                    instance: /api/v1/trade-requests
+                    code: TRADE_CUTOFF_PASSED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                tradePositionMismatch:
+                  summary: The colleague is not qualified for the position
+                  description: |-
+                    **Cause:** Olena Kovalenko sends a cover request to a cashier who does not have the position Barista.
+
+                    **Client reaction:** Show the message and let the user choose a qualified colleague.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/trade-position-mismatch'
+                    title: Trade position mismatch
+                    status: 422
+                    detail: Employee 9f5c0a6e-2d7b-4e1c-8a5f-6b8d0e2c4a57 is not qualified for the position Barista of the offered shift.
+                    instance: /api/v1/trade-requests
+                    code: TRADE_POSITION_MISMATCH
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                invalidTradeTarget:
+                  summary: The target is the requester
+                  description: |-
+                    **Cause:** Olena Kovalenko sends a cover request with her own user ID in `targetEmployeeId`.
+
+                    **Client reaction:** Show the message next to the colleague field.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invalid-trade-target'
+                    title: Invalid trade target
+                    status: 422
+                    detail: You cannot send a trade request to yourself.
+                    instance: /api/v1/trade-requests
+                    code: INVALID_TRADE_TARGET
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /targetEmployeeId
+                        code: INVALID_VALUE
+                        message: Must not be the requester.
+                idempotencyKeyReused:
+                  summary: The key belongs to another request
+                  description: |-
+                    **Cause:** The SPA uses the key of the swap request again for a new cover request with a different body.
+
+                    **Client reaction:** This is a bug in the client: generate a new key for each new user action.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/idempotency-key-reused'
+                    title: Idempotency key reused
+                    status: 422
+                    detail: The idempotency key 0f8d6c1e-3b5a-4e7d-9c2b-6a4f8e1d3c57 belongs to a different request.
+                    instance: /api/v1/trade-requests
+                    code: IDEMPOTENCY_KEY_REUSED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '429':
+          description: 'The `trades` rate limit policy is empty (20 requests per 60 s). Code: `RATE_LIMITED`.'
+          headers:
+            Retry-After:
+              description: Seconds to wait. The same value as `retryAfterSeconds`.
+              schema:
+                type: integer
+                minimum: 0
+              example: 9
+            RateLimit-Policy:
+              description: The policy of the operation. `q` is the quota, `w` is the window in seconds.
+              schema:
+                type: string
+              example: '"trades";q=20;w=60'
+            RateLimit:
+              description: The state of the policy. `r` is the remaining quota, `t` is the seconds until a reset.
+              schema:
+                type: string
+              example: '"trades";r=0;t=9'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/RateLimitProblem'
+              examples:
+                rateLimited:
+                  summary: Too many trade requests in 60 s
+                  description: |-
+                    **Cause:** A script sends trade requests for the account of Olena Kovalenko, 20 requests in 60 s.
+
+                    **Client reaction:** Disable the Send button with a countdown of `Retry-After` seconds, then retry with the same key, exponential backoff and jitter.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/rate-limited'
+                    title: Too many requests
+                    status: 429
+                    detail: You sent 20 trade requests in 60 s. Wait 9 s.
+                    instance: /api/v1/trade-requests
+                    code: RATE_LIMITED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    retryAfterSeconds: 9
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /trade-requests/{tradeRequestId}/accept:
+    post:
+      operationId: acceptTradeRequest
+      x-api-id: API-10
+      x-service: Trade service (`trade-service`)
+      x-requirements: [REQ-FUNC-013]
+      x-concurrency: [CS-3]
+      tags: [Trades]
+      summary: 'API-10: Accept a trade request'
+      description: |-
+        The target employee accepts a trade request. For a `COVER` without a target, any active
+        employee of the location who is qualified for the position can accept. The first accept wins,
+        and the others get 409 `TRADE_NOT_PENDING`.
+
+        The Trade service calls the Scheduling service. The Scheduling service checks the labor rules
+        for the new owners and, for a `SWAP`, places a trade lock on the requested assignment (CS-3).
+        The status changes from `PENDING_PEER` to `PENDING_MANAGER`. The request has no body.
+
+        **Roles:** EMPLOYEE (the target of the trade request, or a qualified colleague for an open cover).
+
+        **Concurrency:** CS-3 (orchestrated saga and trade lock).
+
+        **Requirements:** REQ-FUNC-013.
+
+        **API ID:** `x-api-id: API-10`.
+      parameters:
+        - $ref: '#/components/parameters/TradeRequestId'
+        - $ref: '#/components/parameters/Traceparent'
+      responses:
+        '200':
+          description: The trade request is accepted and waits for the decision of a manager.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeRequest'
+              examples:
+                tradeAccepted:
+                  summary: Taras Melnyk accepted the swap
+                  value:
+                    id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+                    type: SWAP
+                    status: PENDING_MANAGER
+                    requesterId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    offeredAssignmentId: 'e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091'
+                    requestedAssignmentId: 'f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102'
+                    targetEmployeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    acceptedBy: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    message: Can we swap? I have a doctor appointment on Thursday morning.
+                    expiresAt: '2026-11-04T08:00:00+02:00'
+                    createdAt: '2026-11-02T10:00:00+02:00'
+                    version: 2
+        '403':
+          description: 'The caller is not the target of the trade request. Code: `NOT_TRADE_TARGET`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                notTradeTarget:
+                  summary: Another employee tries to accept the swap
+                  description: |-
+                    **Cause:** A barista of Rynok Square who is not Taras Melnyk accepts the swap request.
+
+                    **Client reaction:** Do not retry and remove the item from the inbox.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/not-trade-target'
+                    title: Not the trade target
+                    status: 403
+                    detail: You are not the target of trade request 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: NOT_TRADE_TARGET
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The trade request is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The trade request is in another organization
+                  description: |-
+                    **Cause:** An employee of another organization sends the request. Tenant isolation hides the trade request.
+
+                    **Client reaction:** Remove the stale item from the inbox, reload the inbox and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Trade request 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e was not found.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: TradeRequest
+                      id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+        '409':
+          description: 'The trade request is not `PENDING_PEER`, or the requested assignment has a trade lock. Codes: `TRADE_NOT_PENDING`, `ASSIGNMENT_LOCKED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                tradeNotPending:
+                  summary: The trade request was accepted already
+                  description: |-
+                    **Cause:** Taras Melnyk taps "Accept" on his phone and on his laptop. The first request changed the status to `PENDING_MANAGER`.
+
+                    **Client reaction:** Reload the trade request and show its current status.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/trade-not-pending'
+                    title: Trade request not pending
+                    status: 409
+                    detail: Trade request 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e is PENDING_MANAGER. Only a PENDING_PEER trade request can be accepted.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: TRADE_NOT_PENDING
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      status: PENDING_MANAGER
+                assignmentLocked:
+                  summary: The requested assignment is in another pending trade request
+                  description: |-
+                    **Cause:** Taras Melnyk has a pending cover request for his Friday shift. The swap needs the same assignment.
+
+                    **Client reaction:** Show the pending trade request from `currentState.tradeLock` and retry after it closes.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/assignment-locked'
+                    title: Assignment locked by a trade request
+                    status: 409
+                    detail: Assignment f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102 has a trade lock of the pending trade request 7b8c9d0e-1f2a-4b3c-8d4e-5f6a7b8c9d0e.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: ASSIGNMENT_LOCKED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      assignmentId: 'f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102'
+                      tradeLock: '7b8c9d0e-1f2a-4b3c-8d4e-5f6a7b8c9d0e'
+        '422':
+          description: 'The trade breaks a labor rule, a qualification rule or the trade cutoff. Codes: `LABOR_RULE_VIOLATION` (`overridable` is always false here), `POSITION_NOT_QUALIFIED`, `TRADE_CUTOFF_PASSED`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/LaborRuleProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                laborRuleViolation:
+                  summary: The swap breaks the minimum rest of the accepter
+                  description: |-
+                    **Cause:** Taras Melnyk works on Wednesday until 24:00. With the Thursday shift from 08:00, his rest is 8 h.
+
+                    **Client reaction:** Show each violation and offer to decline the trade request, because employees cannot override.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/labor-rule-violation'
+                    title: Labor rule violation
+                    status: 422
+                    detail: The trade breaks 1 labor rule for you.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: LABOR_RULE_VIOLATION
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    violations:
+                      - rule: MIN_REST
+                        limit: 11
+                        actual: 8
+                        unit: HOURS
+                        employeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                        conflictingAssignmentId: '0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f'
+                    overridable: false
+                positionNotQualified:
+                  summary: The accepter is not qualified for the position any more
+                  description: |-
+                    **Cause:** After the trade request was created, the admin removed the position Barista from the membership of Taras Melnyk.
+
+                    **Client reaction:** Show the message and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/position-not-qualified'
+                    title: Employee not qualified for the position
+                    status: 422
+                    detail: You are not qualified for the position Barista of the offered shift.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: POSITION_NOT_QUALIFIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                tradeCutoffPassed:
+                  summary: The trade cutoff passed before the expiry job ran
+                  description: |-
+                    **Cause:** Taras Melnyk accepts 30 s after the cutoff. The expiry job did not close the request yet, but the server checks the time itself.
+
+                    **Client reaction:** Tell the user to contact the manager.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/trade-cutoff-passed'
+                    title: Trade cutoff passed
+                    status: 422
+                    detail: The trade cutoff of this trade request passed at 2026-11-04T08:00:00+02:00.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: TRADE_CUTOFF_PASSED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '429':
+          description: 'The `trades` rate limit policy is empty (20 requests per 60 s). Code: `RATE_LIMITED`.'
+          headers:
+            Retry-After:
+              description: Seconds to wait. The same value as `retryAfterSeconds`.
+              schema:
+                type: integer
+                minimum: 0
+              example: 14
+            RateLimit-Policy:
+              description: The policy of the operation. `q` is the quota, `w` is the window in seconds.
+              schema:
+                type: string
+              example: '"trades";q=20;w=60'
+            RateLimit:
+              description: The state of the policy. `r` is the remaining quota, `t` is the seconds until a reset.
+              schema:
+                type: string
+              example: '"trades";r=0;t=14'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/RateLimitProblem'
+              examples:
+                rateLimited:
+                  summary: Too many trade actions in 60 s
+                  description: |-
+                    **Cause:** Taras Melnyk sent 20 trade actions in 60 s.
+
+                    **Client reaction:** Disable the Accept button with a countdown of `Retry-After` seconds, then retry with exponential backoff and jitter.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/rate-limited'
+                    title: Too many requests
+                    status: 429
+                    detail: You sent 20 trade requests in 60 s. Wait 14 s.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/accept'
+                    code: RATE_LIMITED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    retryAfterSeconds: 14
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /trade-requests/{tradeRequestId}/decision:
+    post:
+      operationId: decideTradeRequest
+      x-api-id: API-11
+      x-service: Trade service (`trade-service`)
+      x-requirements: [REQ-FUNC-014, REQ-FUNC-016]
+      x-concurrency: [CS-3]
+      tags: [Trades]
+      summary: 'API-11: Approve or reject a trade request'
+      description: |-
+        A manager approves or rejects a trade request in the status `PENDING_MANAGER`. Before the
+        decision, the Trade service asks the Scheduling service to validate the trade again.
+
+        `APPROVE` returns 202 with the status `EXECUTING`. The Trade service sends the command
+        `ExecuteTrade`, and the Scheduling service moves the assignments and releases the trade locks
+        in one local transaction (the pivot of the saga, CS-3). The final status (`APPROVED` or
+        `FAILED`) comes as a notification. `REJECT` returns 200 with the status `REJECTED` and
+        releases the trade locks (compensation). The server accepts `override` only with `APPROVE`.
+
+        **Roles:** MANAGER (own locations), ADMIN.
+
+        **Concurrency:** CS-3 (orchestrated saga, pivot transaction and compensation).
+
+        **Requirements:** REQ-FUNC-014, REQ-FUNC-016.
+
+        **API ID:** `x-api-id: API-11`.
+      parameters:
+        - $ref: '#/components/parameters/TradeRequestId'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecideTradeRequestRequest'
+            examples:
+              approve:
+                summary: Iryna Bondar approves the swap
+                value:
+                  decision: APPROVE
+                  comment: Approved. Both shifts stay covered.
+              approveWithOverride:
+                summary: Iryna Bondar approves the swap and overrides the minimum rest
+                value:
+                  decision: APPROVE
+                  comment: Approved with an override.
+                  override:
+                    reason: Taras agreed to the short rest before the Thursday shift.
+              reject:
+                summary: Iryna Bondar rejects the swap
+                value:
+                  decision: REJECT
+                  comment: Taras works late on Wednesday. Ask another colleague.
+      responses:
+        '202':
+          description: The trade request is approved and the Scheduling service executes it. The final status comes as a notification.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeRequest'
+              examples:
+                tradeExecuting:
+                  summary: The approved swap in execution
+                  value:
+                    id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+                    type: SWAP
+                    status: EXECUTING
+                    requesterId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    offeredAssignmentId: 'e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091'
+                    requestedAssignmentId: 'f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102'
+                    targetEmployeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    acceptedBy: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    message: Can we swap? I have a doctor appointment on Thursday morning.
+                    expiresAt: '2026-11-04T08:00:00+02:00'
+                    createdAt: '2026-11-02T10:00:00+02:00'
+                    version: 3
+        '200':
+          description: The trade request is rejected. The trade locks are released.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeRequest'
+              examples:
+                tradeRejected:
+                  summary: The rejected swap
+                  value:
+                    id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+                    type: SWAP
+                    status: REJECTED
+                    requesterId: '5b1e6c2a-8f3d-4a7e-9c1b-2d4f6a8e0c13'
+                    offeredAssignmentId: 'e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091'
+                    requestedAssignmentId: 'f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102'
+                    targetEmployeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    acceptedBy: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                    message: Can we swap? I have a doctor appointment on Thursday morning.
+                    expiresAt: '2026-11-04T08:00:00+02:00'
+                    createdAt: '2026-11-02T10:00:00+02:00'
+                    version: 3
+        '400':
+          description: 'The body does not agree with the schema. Code: `VALIDATION_FAILED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The decision value is not known
+                  description: |-
+                    **Cause:** The SPA sends `{"decision": "ACCEPT"}`.
+
+                    **Client reaction:** This is a bug in the client: log it, show a generic error and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The request body has 1 field error.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/decision'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /decision
+                        code: INVALID_VALUE
+                        message: Must be APPROVE or REJECT.
+        '403':
+          description: 'The caller cannot decide this trade request. Codes: `ROLE_NOT_ALLOWED`, `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                roleNotAllowed:
+                  summary: An employee tries to approve
+                  description: |-
+                    **Cause:** Olena Kovalenko (EMPLOYEE) sends a decision for her own trade request.
+
+                    **Client reaction:** Hide the Approve and Reject actions for employees and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/role-not-allowed'
+                    title: Role not allowed
+                    status: 403
+                    detail: The role EMPLOYEE cannot decide trade requests.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/decision'
+                    code: ROLE_NOT_ALLOWED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                locationScopeDenied:
+                  summary: The trade request is at a location of another manager
+                  description: |-
+                    **Cause:** A manager of another location of Lviv Coffee Co. decides the Rynok Square trade request.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and refresh the view.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/decision'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The trade request is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The trade request is in another organization
+                  description: |-
+                    **Cause:** A manager of another organization sends the request. Tenant isolation hides the trade request.
+
+                    **Client reaction:** Remove the stale item from the approval list, reload the list and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Trade request 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e was not found.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/decision'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: TradeRequest
+                      id: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+        '409':
+          description: 'The trade request is not `PENDING_MANAGER`. Code: `TRADE_NOT_PENDING`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ConflictProblem'
+              examples:
+                tradeNotPending:
+                  summary: The trade request expired
+                  description: |-
+                    **Cause:** The trade expiry job (CS-6) closed the request at 08:00 on 2026-11-04. Iryna Bondar decides 5 min later.
+
+                    **Client reaction:** Reload the trade request and show its current status.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/trade-not-pending'
+                    title: Trade request not pending
+                    status: 409
+                    detail: Trade request 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e is EXPIRED. Only a PENDING_MANAGER trade request can be decided.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/decision'
+                    code: TRADE_NOT_PENDING
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    currentState:
+                      status: EXPIRED
+        '422':
+          description: 'The trade breaks a labor rule or the trade cutoff. Codes: `LABOR_RULE_VIOLATION` (`overridable` is true for the manager), `TRADE_CUTOFF_PASSED`.'
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/LaborRuleProblem'
+                  - $ref: '#/components/schemas/Problem'
+              examples:
+                laborRuleViolation:
+                  summary: The swap breaks the minimum rest of the accepter
+                  description: |-
+                    **Cause:** After Taras Melnyk accepted, Andrii Shevchenko assigned him to a Wednesday shift until 24:00. With the Thursday shift from 08:00, his rest is 8 h.
+
+                    **Client reaction:** Show each violation and offer "Approve with override" with a reason, or reject the trade request.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/labor-rule-violation'
+                    title: Labor rule violation
+                    status: 422
+                    detail: The trade breaks 1 labor rule. You can approve it with an override.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/decision'
+                    code: LABOR_RULE_VIOLATION
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    violations:
+                      - rule: MIN_REST
+                        limit: 11
+                        actual: 8
+                        unit: HOURS
+                        employeeId: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+                        conflictingAssignmentId: '0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f'
+                    overridable: true
+                tradeCutoffPassed:
+                  summary: The trade cutoff passed
+                  description: |-
+                    **Cause:** Iryna Bondar decides 20 s after the cutoff (08:00 on 2026-11-04). The expiry job did not close the request yet, but the server checks the time itself.
+
+                    **Client reaction:** Tell the manager to change the assignments directly in the schedule.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/trade-cutoff-passed'
+                    title: Trade cutoff passed
+                    status: 422
+                    detail: The trade cutoff of this trade request passed at 2026-11-04T08:00:00+02:00.
+                    instance: '/api/v1/trade-requests/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e/decision'
+                    code: TRADE_CUTOFF_PASSED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /locations/{locationId}/analytics/coverage:
+    get:
+      operationId: getLocationCoverage
+      x-api-id: API-12
+      x-service: Analytics service (`analytics-service`)
+      x-requirements: [REQ-FUNC-018]
+      x-concurrency: []
+      tags: [Analytics]
+      summary: 'API-12: Get the coverage of a location'
+      description: |-
+        Returns the coverage of a location for a date range: required slots, filled slots, coverage
+        rate and unfilled shifts, per day or per week. The data comes from a read model of the
+        Analytics service, which consumes the Kafka events of the Scheduling service. The read model is
+        eventually consistent: `asOf` shows its freshness, and the normal lag is less than 5 s.
+
+        **Roles:** MANAGER (own locations), ADMIN.
+
+        **Concurrency:** None. The operation is a safe GET, and the client can retry it.
+
+        **Requirements:** REQ-FUNC-018.
+
+        **API ID:** `x-api-id: API-12`.
+      parameters:
+        - $ref: '#/components/parameters/LocationId'
+        - name: from
+          in: query
+          required: true
+          description: The first day of the range (local date of the location).
+          schema:
+            type: string
+            format: date
+          example: '2026-11-02'
+        - name: to
+          in: query
+          required: true
+          description: The last day of the range (included). The range can have 92 days or less.
+          schema:
+            type: string
+            format: date
+          example: '2026-11-08'
+        - name: granularity
+          in: query
+          required: false
+          description: The length of one item in `items`.
+          schema:
+            type: string
+            enum: [DAY, WEEK]
+            default: DAY
+          example: DAY
+        - $ref: '#/components/parameters/Traceparent'
+      responses:
+        '200':
+          description: The coverage of the location.
+          headers:
+            traceparent:
+              $ref: '#/components/headers/traceparent'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Coverage'
+              examples:
+                weekByDay:
+                  summary: The coverage of Rynok Square for the week of 2026-11-02, per day
+                  value:
+                    locationId: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+                    from: '2026-11-02'
+                    to: '2026-11-08'
+                    granularity: DAY
+                    asOf: '2026-11-09T09:15:03+02:00'
+                    totals:
+                      requiredSlots: 120
+                      filledSlots: 114
+                      coverageRate: 0.95
+                      unfilledShifts: 5
+                    items:
+                      - periodStart: '2026-11-02'
+                        requiredSlots: 16
+                        filledSlots: 16
+                        coverageRate: 1
+                        unfilledShifts: 0
+                      - periodStart: '2026-11-03'
+                        requiredSlots: 16
+                        filledSlots: 15
+                        coverageRate: 0.9375
+                        unfilledShifts: 1
+                      - periodStart: '2026-11-04'
+                        requiredSlots: 16
+                        filledSlots: 16
+                        coverageRate: 1
+                        unfilledShifts: 0
+                      - periodStart: '2026-11-05'
+                        requiredSlots: 18
+                        filledSlots: 17
+                        coverageRate: 0.9444
+                        unfilledShifts: 1
+                      - periodStart: '2026-11-06'
+                        requiredSlots: 18
+                        filledSlots: 18
+                        coverageRate: 1
+                        unfilledShifts: 0
+                      - periodStart: '2026-11-07'
+                        requiredSlots: 20
+                        filledSlots: 18
+                        coverageRate: 0.9
+                        unfilledShifts: 2
+                      - periodStart: '2026-11-08'
+                        requiredSlots: 16
+                        filledSlots: 14
+                        coverageRate: 0.875
+                        unfilledShifts: 1
+                weekTotal:
+                  summary: The same week with `granularity=WEEK`
+                  value:
+                    locationId: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+                    from: '2026-11-02'
+                    to: '2026-11-08'
+                    granularity: WEEK
+                    asOf: '2026-11-09T09:15:03+02:00'
+                    totals:
+                      requiredSlots: 120
+                      filledSlots: 114
+                      coverageRate: 0.95
+                      unfilledShifts: 5
+                    items:
+                      - periodStart: '2026-11-02'
+                        requiredSlots: 120
+                        filledSlots: 114
+                        coverageRate: 0.95
+                        unfilledShifts: 5
+        '400':
+          description: 'A query parameter has a wrong format. Code: `VALIDATION_FAILED`. For a query parameter, `pointer` is `/` and the parameter name.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                validationFailed:
+                  summary: The date has a wrong format
+                  description: |-
+                    **Cause:** Iryna Bondar sends `from=02.11.2026`.
+
+                    **Client reaction:** Show the message next to the date field and do not retry without a change.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/validation-failed'
+                    title: Request validation failed
+                    status: 400
+                    detail: The query has 1 parameter error.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/analytics/coverage'
+                    code: VALIDATION_FAILED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /from
+                        code: INVALID_FORMAT
+                        message: Must be a date in the format YYYY-MM-DD.
+        '403':
+          description: 'The caller cannot see the analytics of this location. Codes: `ROLE_NOT_ALLOWED`, `LOCATION_SCOPE_DENIED`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                roleNotAllowed:
+                  summary: An employee opens the analytics
+                  description: |-
+                    **Cause:** Olena Kovalenko (EMPLOYEE) sends the request.
+
+                    **Client reaction:** Hide the Analytics menu item for employees and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/role-not-allowed'
+                    title: Role not allowed
+                    status: 403
+                    detail: The role EMPLOYEE cannot view coverage analytics.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/analytics/coverage'
+                    code: ROLE_NOT_ALLOWED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                locationScopeDenied:
+                  summary: The location is not in the scope of the manager
+                  description: |-
+                    **Cause:** A manager of another location of Lviv Coffee Co. opens the Rynok Square analytics.
+
+                    **Client reaction:** Do not retry, reload the membership context with `GET /me` and show only the locations from it.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/location-scope-denied'
+                    title: Location not in scope
+                    status: 403
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a is not in your scope.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/analytics/coverage'
+                    code: LOCATION_SCOPE_DENIED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+        '404':
+          description: 'The location is not visible to the caller. Code: `RESOURCE_NOT_FOUND`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/NotFoundProblem'
+              examples:
+                resourceNotFound:
+                  summary: The location is in another organization
+                  description: |-
+                    **Cause:** A manager of another organization sends the request. Tenant isolation hides the location.
+
+                    **Client reaction:** Remove the stale location, reload the list of locations and do not retry.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/resource-not-found'
+                    title: Resource not found
+                    status: 404
+                    detail: Location 7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a was not found.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/analytics/coverage'
+                    code: RESOURCE_NOT_FOUND
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    resource:
+                      type: Location
+                      id: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+        '422':
+          description: '`from` is later than `to`, or the range is longer than 92 days. Code: `INVALID_DATE_RANGE`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ValidationProblem'
+              examples:
+                invalidDateRange:
+                  summary: The start of the range is after the end
+                  description: |-
+                    **Cause:** Iryna Bondar sends `from=2026-11-08&to=2026-11-02`.
+
+                    **Client reaction:** Show the message next to the date fields.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/invalid-date-range'
+                    title: Invalid date range
+                    status: 422
+                    detail: from must not be later than to, and the range must not be longer than 92 days.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/analytics/coverage'
+                    code: INVALID_DATE_RANGE
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    errors:
+                      - pointer: /to
+                        code: BEFORE_FROM
+                        message: Must not be earlier than from (2026-11-08).
+        '429':
+          description: 'The `analytics` rate limit policy is empty (30 requests per 60 s). Code: `RATE_LIMITED`.'
+          headers:
+            Retry-After:
+              description: Seconds to wait. The same value as `retryAfterSeconds`.
+              schema:
+                type: integer
+                minimum: 0
+              example: 8
+            RateLimit-Policy:
+              description: The policy of the operation. `q` is the quota, `w` is the window in seconds.
+              schema:
+                type: string
+              example: '"analytics";q=30;w=60'
+            RateLimit:
+              description: The state of the policy. `r` is the remaining quota, `t` is the seconds until a reset.
+              schema:
+                type: string
+              example: '"analytics";r=0;t=8'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/RateLimitProblem'
+              examples:
+                rateLimited:
+                  summary: Too many analytics requests in 60 s
+                  description: |-
+                    **Cause:** The dashboard of Iryna Bondar reloads the coverage for many date ranges, 30 requests in 60 s.
+
+                    **Client reaction:** Show a countdown of `Retry-After` seconds, then retry the GET with exponential backoff and jitter.
+                  value:
+                    type: 'https://docs.shifthappens.example/problems/rate-limited'
+                    title: Too many requests
+                    status: 429
+                    detail: You sent 30 analytics requests in 60 s. Wait 8 s.
+                    instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/analytics/coverage'
+                    code: RATE_LIMITED
+                    traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                    retryAfterSeconds: 8
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    cognitoBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |-
+        An Amazon Cognito access token (JWT). The Angular SPA gets it with the OAuth 2.0 Authorization
+        Code flow with PKCE through the Cognito managed login. The access token is valid for 15 min.
+        The SPA keeps it in memory and gets a new one with the refresh token (30 days, rotation).
+        The Edge Gateway validates the signature against the Cognito JWKS and loads the membership
+        context of the `sub` claim.
+
+  parameters:
+    OrgId:
+      name: orgId
+      in: path
+      required: true
+      description: The ID of the organization (tenant).
+      schema:
+        type: string
+        format: uuid
+      example: '0b9f5c3e-2d1a-4f6b-8c7d-9e0a1b2c3d4e'
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: The user ID of the member (the Cognito `sub`).
+      schema:
+        type: string
+        format: uuid
+      example: '6c2f7d3b-9a4e-4b8f-8d2c-3e5a7b9f1d24'
+    LocationId:
+      name: locationId
+      in: path
+      required: true
+      description: The ID of the location.
+      schema:
+        type: string
+        format: uuid
+      example: '7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a'
+    ScheduleId:
+      name: scheduleId
+      in: path
+      required: true
+      description: The ID of the schedule.
+      schema:
+        type: string
+        format: uuid
+      example: 'c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f'
+    ShiftId:
+      name: shiftId
+      in: path
+      required: true
+      description: The ID of the shift.
+      schema:
+        type: string
+        format: uuid
+      example: 'd5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80'
+    TradeRequestId:
+      name: tradeRequestId
+      in: path
+      required: true
+      description: The ID of the trade request.
+      schema:
+        type: string
+        format: uuid
+      example: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e'
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |-
+        A UUID that the client generates for one user action. Send the same key with each retry of the
+        same action. The server keeps the key and the response for 24 h. A missing key returns 400
+        `IDEMPOTENCY_KEY_MISSING`.
+      schema:
+        type: string
+        format: uuid
+      example: '0f8d6c1e-3b5a-4e7d-9c2b-6a4f8e1d3c57'
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |-
+        Optional. A UUID that the client generates for one user action. With a key, a retry of the same
+        action returns the stored response and does not create a second object. The server keeps the
+        key and the response for 24 h.
+      schema:
+        type: string
+        format: uuid
+      example: '0f8d6c1e-3b5a-4e7d-9c2b-6a4f8e1d3c57'
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: Optional W3C Trace Context header. Without it, the Edge Gateway starts a new trace.
+      schema:
+        type: string
+        pattern: '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+      example: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+
+  headers:
+    Retry-After:
+      description: |-
+        The number of seconds to wait before the next request (RFC 9110, section 10.2.3). It has the
+        same value as `retryAfterSeconds` in the problem body. It has priority over `RateLimit`.
+      schema:
+        type: integer
+        minimum: 0
+      example: 23
+    RateLimit-Policy:
+      description: |-
+        The quota policies of the operation (IETF draft-ietf-httpapi-ratelimit-headers). `q` is the
+        quota and `w` is the window in seconds.
+      schema:
+        type: string
+      example: '"default";q=100;w=60'
+    RateLimit:
+      description: |-
+        The state of the policy that stopped the request (IETF draft-ietf-httpapi-ratelimit-headers).
+        `r` is the remaining quota and `t` is the number of seconds until the quota resets.
+      schema:
+        type: string
+      example: '"default";r=0;t=23'
+    Idempotent-Replayed:
+      description: |-
+        Present with the value `true` when the response is the stored response of an earlier request
+        with the same `Idempotency-Key`. The server did not run the operation again.
+      schema:
+        type: string
+        enum: ['true']
+      example: 'true'
+    traceparent:
+      description: |-
+        The W3C Trace Context of the request. Its trace-id part is the same value as `traceId` in a
+        problem body.
+      schema:
+        type: string
+        pattern: '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+      example: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+    WWW-Authenticate:
+      description: The authentication challenge of RFC 6750 for a bearer token.
+      schema:
+        type: string
+      example: 'Bearer error="invalid_token", error_description="The access token expired"'
+
+  responses:
+    Unauthorized:
+      description: |-
+        The request has no access token, the signature is not valid, or the token expired.
+        Code: `AUTHENTICATION_REQUIRED`. The Edge Gateway returns this response before the request
+        reaches a service.
+      headers:
+        WWW-Authenticate:
+          $ref: '#/components/headers/WWW-Authenticate'
+        traceparent:
+          $ref: '#/components/headers/traceparent'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            authenticationRequired:
+              summary: The access token expired
+              description: |-
+                **Cause:** Olena Kovalenko claims a shift (API-08) 16 min after the last token refresh. The access token is valid for 15 min. Other operations return the same body with their own `instance`.
+
+                **Client reaction:** Refresh the token one time and repeat the request; if it fails again, go to the sign-in page.
+              value:
+                type: 'https://docs.shifthappens.example/problems/authentication-required'
+                title: Authentication required
+                status: 401
+                detail: The access token expired.
+                instance: '/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims'
+                code: AUTHENTICATION_REQUIRED
+                traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+    RateLimited:
+      description: |-
+        The `default` rate limit policy (100 requests per 60 s per user) is empty. Code: `RATE_LIMITED`.
+        API-02 and API-04 use this policy. The operations with a dedicated policy (`invitations`,
+        `claims`, `trades`, `analytics`) have their own 429 response.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        RateLimit-Policy:
+          $ref: '#/components/headers/RateLimit-Policy'
+        RateLimit:
+          $ref: '#/components/headers/RateLimit'
+        traceparent:
+          $ref: '#/components/headers/traceparent'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/RateLimitProblem'
+          examples:
+            rateLimited:
+              summary: Too many requests in 60 s
+              description: |-
+                **Cause:** A browser script of Iryna Bondar repeats the request to create a schedule (API-04), more than 100 times in 60 s. API-02 returns the same body with its own `instance`; there the limit also stops scripts that try many invitation tokens.
+
+                **Client reaction:** Wait `Retry-After` seconds with a countdown on the button, then retry with exponential backoff and jitter.
+              value:
+                type: 'https://docs.shifthappens.example/problems/rate-limited'
+                title: Too many requests
+                status: 429
+                detail: You sent more than 100 requests in 60 s. Wait 23 s.
+                instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/schedules'
+                code: RATE_LIMITED
+                traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                retryAfterSeconds: 23
+    InternalError:
+      description: |-
+        An unexpected error. Code: `INTERNAL_ERROR`. The body has no internal details. The logs and
+        traces have the details under the same `traceId`.
+      headers:
+        traceparent:
+          $ref: '#/components/headers/traceparent'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            internalError:
+              summary: An unexpected error
+              description: |-
+                **Cause:** The Analytics service has an unexpected error while it reads the coverage (API-12). Other operations return the same body with their own `instance`.
+
+                **Client reaction:** Show a generic error with the `traceId`; retry a GET only.
+              value:
+                type: 'https://docs.shifthappens.example/problems/internal-error'
+                title: Internal error
+                status: 500
+                detail: An unexpected error occurred. Give the trace ID to support.
+                instance: '/api/v1/locations/7d3e2f1a-4b5c-4d6e-9f8a-0b1c2d3e4f5a/analytics/coverage'
+                code: INTERNAL_ERROR
+                traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+    ServiceUnavailable:
+      description: |-
+        A dependency is not available, or a circuit breaker is open. Code: `SERVICE_UNAVAILABLE`. The
+        server did not apply the change.
+      headers:
+        Retry-After:
+          description: The number of seconds to wait. The same value as `retryAfterSeconds`.
+          schema:
+            type: integer
+            minimum: 0
+          example: 5
+        traceparent:
+          $ref: '#/components/headers/traceparent'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/RateLimitProblem'
+          examples:
+            serviceUnavailable:
+              summary: The service cannot complete the request now
+              description: |-
+                **Cause:** Iryna Bondar publishes a schedule (API-06), but the outbox write fails and the transaction rolls back (CS-5). Other operations return the same body with their own `instance`.
+
+                **Client reaction:** Retry after `Retry-After` seconds with exponential backoff (max 3 times); then show the error with the `traceId`.
+              value:
+                type: 'https://docs.shifthappens.example/problems/service-unavailable'
+                title: Service unavailable
+                status: 503
+                detail: The service is not available now. Try again after 5 s.
+                instance: '/api/v1/schedules/c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/publish'
+                code: SERVICE_UNAVAILABLE
+                traceId: '4bf92f3577b34da6a3ce929d0e0e4736'
+                retryAfterSeconds: 5
+
+  schemas:
+    # ---------------------------------------------------------------- problem details (RFC 9457)
+    Problem:
+      type: object
+      description: |-
+        The error body of all 4xx and 5xx responses (RFC 9457, `application/problem+json`). The
+        extension schemas below add members for some codes. Clients must ignore members that they do
+        not know.
+      required: [type, title, status, detail, instance, code, traceId]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: The problem type. It is `https://docs.shifthappens.example/problems/` and the code in kebab case.
+          examples: ['https://docs.shifthappens.example/problems/slot-filled']
+        title:
+          type: string
+          description: A short, stable summary of the problem type. It does not change from occurrence to occurrence.
+          examples: [No open slot]
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+          description: The HTTP status code. It is always the same as the status of the response.
+          examples: [409]
+        detail:
+          type: string
+          description: An explanation of this occurrence for a human. Clients do not parse it.
+          examples: [Shift d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80 has no open slot. Another employee took the last slot.]
+        instance:
+          type: string
+          format: uri-reference
+          description: The path of the request.
+          examples: ['/api/v1/shifts/d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80/claims']
+        code:
+          type: string
+          description: The stable machine code of the problem. Clients switch on this value.
+          enum:
+            - MALFORMED_REQUEST
+            - VALIDATION_FAILED
+            - IDEMPOTENCY_KEY_MISSING
+            - AUTHENTICATION_REQUIRED
+            - ROLE_NOT_ALLOWED
+            - LOCATION_SCOPE_DENIED
+            - NOT_RESOURCE_OWNER
+            - NOT_TRADE_TARGET
+            - MFA_REQUIRED
+            - INVITATION_EMAIL_MISMATCH
+            - RESOURCE_NOT_FOUND
+            - VERSION_CONFLICT
+            - SLOT_FILLED
+            - ASSIGNMENT_OVERLAP
+            - ALREADY_ASSIGNED
+            - CAPACITY_BELOW_ASSIGNED
+            - SHIFT_ALREADY_STARTED
+            - SCHEDULE_ALREADY_EXISTS
+            - SCHEDULE_ALREADY_PUBLISHED
+            - ASSIGNMENT_LOCKED
+            - TRADE_NOT_PENDING
+            - ALREADY_MEMBER
+            - INVITATION_ALREADY_PENDING
+            - INVITATION_ALREADY_USED
+            - MEMBER_ALREADY_DEACTIVATED
+            - LAST_ADMIN
+            - IDEMPOTENCY_REQUEST_IN_PROGRESS
+            - LABOR_RULE_VIOLATION
+            - POSITION_NOT_QUALIFIED
+            - INVALID_TIME_RANGE
+            - INVALID_WEEK_START
+            - SCHEDULE_NOT_PUBLISHABLE
+            - TRADE_CUTOFF_PASSED
+            - TRADE_POSITION_MISMATCH
+            - INVALID_TRADE_TARGET
+            - INVITATION_EXPIRED
+            - EFFECTIVE_DATE_IN_PAST
+            - INVALID_DATE_RANGE
+            - IDEMPOTENCY_KEY_REUSED
+            - RATE_LIMITED
+            - INVITATION_QUOTA_EXCEEDED
+            - INTERNAL_ERROR
+            - SERVICE_UNAVAILABLE
+        traceId:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+          description: The W3C trace ID of the request. Support uses it to find the logs and traces.
+          examples: ['4bf92f3577b34da6a3ce929d0e0e4736']
+    ValidationProblem:
+      description: A problem with field errors. Used by 400 `VALIDATION_FAILED` and by the 422 codes that point to fields.
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [errors]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_FAILED
+                - INVALID_TIME_RANGE
+                - INVALID_WEEK_START
+                - SCHEDULE_NOT_PUBLISHABLE
+                - INVALID_TRADE_TARGET
+                - EFFECTIVE_DATE_IN_PAST
+                - INVALID_DATE_RANGE
+            errors:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/FieldError'
+    FieldError:
+      type: object
+      description: One error of one field.
+      required: [pointer, code, message]
+      properties:
+        pointer:
+          type: string
+          description: |-
+            A JSON Pointer (RFC 6901) to the field in the request body, for example `/override/reason`.
+            For a query parameter, it is `/` and the parameter name. For `SCHEDULE_NOT_PUBLISHABLE`, it
+            points into the schedule resource, for example `/shifts/3/positionId`.
+          examples: [/email]
+        code:
+          type: string
+          description: The stable machine code of the field error.
+          enum:
+            - REQUIRED
+            - INVALID_FORMAT
+            - INVALID_TYPE
+            - INVALID_VALUE
+            - NOT_ALLOWED
+            - TOO_SHORT
+            - TOO_LONG
+            - OUT_OF_RANGE
+            - NOT_A_MONDAY
+            - IN_THE_PAST
+            - END_NOT_AFTER_START
+            - OUTSIDE_SCHEDULE_WEEK
+            - BEFORE_FROM
+            - RANGE_TOO_LONG
+            - NO_SHIFTS
+            - POSITION_INACTIVE
+            - SHIFT_TOO_LONG
+        message:
+          type: string
+          description: A message for a human. The SPA shows it next to the field.
+          examples: [Must be a valid email address.]
+    LaborRuleProblem:
+      description: A problem for 422 `LABOR_RULE_VIOLATION`. It lists every rule that fails.
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [violations, overridable]
+          properties:
+            code:
+              type: string
+              const: LABOR_RULE_VIOLATION
+            violations:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/LaborRuleViolation'
+            overridable:
+              type: boolean
+              description: True only when the caller can send the request again with `override.reason` (a MANAGER or an ADMIN on API-07 and API-11).
+    LaborRuleViolation:
+      type: object
+      description: One labor rule that the request breaks.
+      required: [rule, limit, actual, unit, employeeId]
+      properties:
+        rule:
+          type: string
+          enum: [MIN_REST, MAX_WEEKLY_HOURS, MAX_SHIFT_HOURS]
+          description: The rule of the labor policy.
+        limit:
+          type: number
+          description: The value from the labor policy, for example 11 for `minRestHours`.
+        actual:
+          type: number
+          description: The value that the request causes.
+        unit:
+          type: string
+          enum: [HOURS]
+        employeeId:
+          type: string
+          format: uuid
+          description: The employee for whom the rule fails.
+        conflictingAssignmentId:
+          type: string
+          format: uuid
+          description: The other assignment that causes the violation, when there is one.
+    VersionConflictProblem:
+      description: A problem for 409 `VERSION_CONFLICT` (optimistic concurrency, CS-2).
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [currentVersion]
+          properties:
+            code:
+              type: string
+              const: VERSION_CONFLICT
+            currentVersion:
+              type: integer
+              minimum: 1
+              description: The version on the server now.
+    ConflictProblem:
+      description: A problem for a 409 code that depends on the current state of a resource. `currentState` shows the values that block the request.
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [currentState]
+          properties:
+            code:
+              type: string
+              enum:
+                - SLOT_FILLED
+                - ASSIGNMENT_OVERLAP
+                - ALREADY_ASSIGNED
+                - CAPACITY_BELOW_ASSIGNED
+                - SHIFT_ALREADY_STARTED
+                - SCHEDULE_ALREADY_EXISTS
+                - SCHEDULE_ALREADY_PUBLISHED
+                - ASSIGNMENT_LOCKED
+                - TRADE_NOT_PENDING
+                - ALREADY_MEMBER
+                - INVITATION_ALREADY_PENDING
+                - INVITATION_ALREADY_USED
+                - MEMBER_ALREADY_DEACTIVATED
+                - LAST_ADMIN
+            currentState:
+              $ref: '#/components/schemas/CurrentState'
+    CurrentState:
+      type: object
+      description: The current values that block the request. Each code uses the members that apply to it.
+      minProperties: 1
+      properties:
+        status:
+          type: string
+          description: The current status of the resource (trade request, schedule, membership or invitation).
+        version:
+          type: integer
+        capacity:
+          type: integer
+        assignedCount:
+          type: integer
+        openSlots:
+          type: integer
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        publishedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        deactivatedAt:
+          type: string
+          format: date-time
+        scheduleId:
+          type: string
+          format: uuid
+        assignmentId:
+          type: string
+          format: uuid
+        conflictingAssignmentId:
+          type: string
+          format: uuid
+        employeeId:
+          type: string
+          format: uuid
+        tradeLock:
+          type: string
+          format: uuid
+          description: The ID of the trade request that holds the trade lock.
+        userId:
+          type: string
+          format: uuid
+        invitationId:
+          type: string
+          format: uuid
+        activeAdminCount:
+          type: integer
+    NotFoundProblem:
+      description: A problem for 404 `RESOURCE_NOT_FOUND`.
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [resource]
+          properties:
+            code:
+              type: string
+              const: RESOURCE_NOT_FOUND
+            resource:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  enum: [Organization, Location, Member, Invitation, Schedule, Shift, Assignment, TradeRequest]
+                id:
+                  type: string
+                  format: uuid
+                  description: The ID from the request. It is absent when the request identifies the resource with a secret token.
+    RateLimitProblem:
+      description: A problem that tells the client when to retry. Used by 429 and 503.
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [retryAfterSeconds]
+          properties:
+            code:
+              type: string
+              enum: [RATE_LIMITED, INVITATION_QUOTA_EXCEEDED, SERVICE_UNAVAILABLE]
+            retryAfterSeconds:
+              type: integer
+              minimum: 0
+              description: The same value as the `Retry-After` header.
+
+    # ---------------------------------------------------------------- enums
+    Role:
+      type: string
+      enum: [EMPLOYEE, MANAGER, ADMIN]
+      description: The role of a membership. One role per membership.
+    MembershipStatus:
+      type: string
+      enum: [ACTIVE, DEACTIVATED]
+    ScheduleStatus:
+      type: string
+      enum: [DRAFT, PUBLISHED]
+      description: '`DRAFT` changes to `PUBLISHED` one time. The change is one way.'
+    AssignmentStatus:
+      type: string
+      enum: [ACTIVE, CANCELLED]
+    TradeType:
+      type: string
+      enum: [SWAP, COVER]
+    TradeStatus:
+      type: string
+      enum: [PENDING_PEER, PENDING_MANAGER, EXECUTING, APPROVED, REJECTED, CANCELLED, EXPIRED, FAILED]
+      description: The final states are `APPROVED`, `REJECTED`, `CANCELLED`, `EXPIRED` and `FAILED`.
+
+    # ---------------------------------------------------------------- organization
+    InviteMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [email, role, locationIds, positionIds]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        role:
+          $ref: '#/components/schemas/Role'
+        locationIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        positionIds:
+          type: array
+          uniqueItems: true
+          description: The positions for which the member is qualified. It can be empty for an ADMIN.
+          items:
+            type: string
+            format: uuid
+    Invitation:
+      type: object
+      required: [id, orgId, email, role, locationIds, positionIds, status, expiresAt, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/Role'
+        locationIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        positionIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, EXPIRED]
+        expiresAt:
+          type: string
+          format: date-time
+          description: 7 days after `createdAt`.
+        createdAt:
+          type: string
+          format: date-time
+    AcceptInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: The opaque token from the invitation email (43 characters, base64url).
+          minLength: 43
+          maxLength: 43
+          pattern: '^[A-Za-z0-9_-]{43}$'
+    Membership:
+      type: object
+      required: [orgId, userId, role, locationIds, positionIds, status, joinedAt]
+      properties:
+        orgId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        role:
+          $ref: '#/components/schemas/Role'
+        locationIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        positionIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        status:
+          $ref: '#/components/schemas/MembershipStatus'
+        joinedAt:
+          type: string
+          format: date-time
+    DeactivateMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 10
+          maxLength: 500
+          description: The reason for the audit log.
+        effectiveAt:
+          type: string
+          format: date-time
+          description: The time when the deactivation takes effect. Default is the time of the request. It must not be earlier than now minus 5 min.
+    Member:
+      type: object
+      required: [userId, orgId, status, deactivatedAt]
+      properties:
+        userId:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/MembershipStatus'
+        deactivatedAt:
+          type: string
+          format: date-time
+
+    # ---------------------------------------------------------------- scheduling
+    CreateScheduleRequest:
+      type: object
+      additionalProperties: false
+      required: [weekStart]
+      properties:
+        weekStart:
+          type: string
+          format: date
+          description: A Monday in the time zone of the location. It must not be in the past.
+    Schedule:
+      type: object
+      required: [id, locationId, weekStart, status, version, shifts, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        locationId:
+          type: string
+          format: uuid
+        weekStart:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/ScheduleStatus'
+        version:
+          type: integer
+          minimum: 1
+          description: Increments on each change of the schedule or of its shifts.
+        shifts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Shift'
+        createdAt:
+          type: string
+          format: date-time
+        publishedAt:
+          type: string
+          format: date-time
+          description: Present when `status` is `PUBLISHED`.
+    Shift:
+      type: object
+      required: [id, scheduleId, locationId, positionId, startsAt, endsAt, capacity, assignedCount, openSlots, note, version, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        scheduleId:
+          type: string
+          format: uuid
+        locationId:
+          type: string
+          format: uuid
+        positionId:
+          type: string
+          format: uuid
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 50
+          description: The number of employees that the shift needs.
+        assignedCount:
+          type: integer
+          minimum: 0
+        openSlots:
+          type: integer
+          minimum: 0
+          description: '`capacity` minus `assignedCount`.'
+        note:
+          type: [string, 'null']
+          maxLength: 500
+        version:
+          type: integer
+          minimum: 1
+          description: Increments on each change of the shift.
+        updatedAt:
+          type: string
+          format: date-time
+    UpdateShiftRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 2
+      required: [version]
+      description: The `version` that the client read and one or more fields to change.
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        positionId:
+          type: string
+          format: uuid
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 50
+        note:
+          type: [string, 'null']
+          maxLength: 500
+          description: The value `null` removes the note.
+    PublishScheduleRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: The version of the schedule that the manager reviewed.
+    AssignEmployeeRequest:
+      type: object
+      additionalProperties: false
+      required: [employeeId]
+      properties:
+        employeeId:
+          type: string
+          format: uuid
+        override:
+          $ref: '#/components/schemas/Override'
+    Override:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      description: A decision of a manager to accept a labor rule violation. It goes to the audit log.
+      properties:
+        reason:
+          type: string
+          minLength: 10
+          maxLength: 500
+    Assignment:
+      type: object
+      required: [id, shiftId, employeeId, status, source, overridden, tradeLock, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        shiftId:
+          type: string
+          format: uuid
+        employeeId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/AssignmentStatus'
+        source:
+          type: string
+          enum: [MANAGER, CLAIM, TRADE]
+          description: How the assignment was created.
+        overridden:
+          type: boolean
+          description: True when a manager accepted a labor rule violation for this assignment.
+        tradeLock:
+          type: [string, 'null']
+          format: uuid
+          description: The ID of the pending trade request that locks the assignment, or null.
+        createdAt:
+          type: string
+          format: date-time
+
+    # ---------------------------------------------------------------- trades
+    CreateTradeRequestRequest:
+      description: A `SWAP` must have `requestedAssignmentId`. A `COVER` must not have it and can have `targetEmployeeId`.
+      oneOf:
+        - $ref: '#/components/schemas/CreateSwapTradeRequest'
+        - $ref: '#/components/schemas/CreateCoverTradeRequest'
+      discriminator:
+        propertyName: type
+        mapping:
+          SWAP: '#/components/schemas/CreateSwapTradeRequest'
+          COVER: '#/components/schemas/CreateCoverTradeRequest'
+    CreateSwapTradeRequest:
+      type: object
+      additionalProperties: false
+      required: [type, offeredAssignmentId, requestedAssignmentId]
+      properties:
+        type:
+          type: string
+          const: SWAP
+        offeredAssignmentId:
+          type: string
+          format: uuid
+          description: An own active assignment of the requester.
+        requestedAssignmentId:
+          type: string
+          format: uuid
+          description: The assignment of the colleague. Its owner becomes the target.
+        message:
+          type: string
+          maxLength: 500
+    CreateCoverTradeRequest:
+      type: object
+      additionalProperties: false
+      required: [type, offeredAssignmentId]
+      properties:
+        type:
+          type: string
+          const: COVER
+        offeredAssignmentId:
+          type: string
+          format: uuid
+          description: An own active assignment of the requester.
+        targetEmployeeId:
+          type: string
+          format: uuid
+          description: Optional. Without it, any qualified colleague of the location can accept.
+        message:
+          type: string
+          maxLength: 500
+    TradeRequest:
+      type: object
+      required: [id, type, status, requesterId, offeredAssignmentId, requestedAssignmentId, targetEmployeeId, acceptedBy, expiresAt, createdAt, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/TradeType'
+        status:
+          $ref: '#/components/schemas/TradeStatus'
+        requesterId:
+          type: string
+          format: uuid
+        offeredAssignmentId:
+          type: string
+          format: uuid
+        requestedAssignmentId:
+          type: [string, 'null']
+          format: uuid
+          description: Null for a `COVER`.
+        targetEmployeeId:
+          type: [string, 'null']
+          format: uuid
+          description: Null for an open `COVER`.
+        acceptedBy:
+          type: [string, 'null']
+          format: uuid
+          description: The employee who accepted, or null.
+        message:
+          type: string
+          maxLength: 500
+        expiresAt:
+          type: string
+          format: date-time
+          description: 48 h after creation or the trade cutoff, whichever is earlier.
+        createdAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+    DecideTradeRequestRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [APPROVE, REJECT]
+        comment:
+          type: string
+          maxLength: 500
+        override:
+          $ref: '#/components/schemas/Override'
+
+    # ---------------------------------------------------------------- analytics
+    Coverage:
+      type: object
+      required: [locationId, from, to, granularity, asOf, totals, items]
+      properties:
+        locationId:
+          type: string
+          format: uuid
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        granularity:
+          type: string
+          enum: [DAY, WEEK]
+        asOf:
+          type: string
+          format: date-time
+          description: The time of the last event in the read model. It shows the freshness of the data.
+        totals:
+          type: object
+          required: [requiredSlots, filledSlots, coverageRate, unfilledShifts]
+          properties:
+            requiredSlots:
+              type: integer
+              minimum: 0
+            filledSlots:
+              type: integer
+              minimum: 0
+            coverageRate:
+              type: number
+              minimum: 0
+              maximum: 1
+              description: '`filledSlots` divided by `requiredSlots`.'
+            unfilledShifts:
+              type: integer
+              minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoveragePeriod'
+    CoveragePeriod:
+      type: object
+      required: [periodStart, requiredSlots, filledSlots, coverageRate, unfilledShifts]
+      properties:
+        periodStart:
+          type: string
+          format: date
+          description: The first day of the period (a Monday for `WEEK`).
+        requiredSlots:
+          type: integer
+          minimum: 0
+        filledSlots:
+          type: integer
+          minimum: 0
+        coverageRate:
+          type: number
+          minimum: 0
+          maximum: 1
+        unfilledShifts:
+          type: integer
+          minimum: 0
+          description: Shifts with at least one open slot at the shift start.
