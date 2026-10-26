@@ -1,0 +1,17 @@
+extends:
+  - recommended
+
+rules:
+  # Every 4xx response must use the RFC 9457 problem format.
+  operation-4xx-problem-details-rfc7807: error
+  operation-4xx-response: error
+  # Every example must match its schema.
+  no-invalid-media-type-examples:
+    severity: error
+    allowAdditionalProperties: false
+  no-invalid-parameter-examples: error
+  no-invalid-schema-examples: error
+  operation-operationId: error
+  operation-summary: error
+  operation-description: warn
+  tag-description: error

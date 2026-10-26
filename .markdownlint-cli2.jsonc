@@ -1,0 +1,17 @@
+{
+  "globs": ["README.md", "docs/**/*.md"],
+  "ignores": ["node_modules/**", "dist/**"],
+  "config": {
+    "default": true,
+    // Long table rows and requirement statements do not fit a fixed width.
+    "MD013": false,
+    // Mermaid labels and table cells use <br/> for line breaks.
+    "MD033": { "allowed_elements": ["br", "a", "details", "summary"] },
+    // Each scenario repeats the same sub-headings.
+    "MD024": { "siblings_only": true },
+    // Requirement records use bold labels, not headings.
+    "MD036": false,
+    // Compact delimiter rows (|---|---|) are the convention in this repository.
+    "MD060": false
+  }
+}

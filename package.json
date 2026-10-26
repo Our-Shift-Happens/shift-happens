@@ -1,0 +1,32 @@
+{
+  "name": "shift-happens-docs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Documentation checks for the Shift Happens project",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chillipizdrikk/shift-happens.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "docs:check": "npm run docs:lint:md && npm run docs:lint:links && npm run docs:lint:api && npm run docs:check:mermaid",
+    "docs:lint:md": "markdownlint-cli2",
+    "docs:lint:links": "remark . --quiet --frail --no-stdout",
+    "docs:lint:api": "redocly lint docs/api/openapi.yaml",
+    "docs:check:mermaid": "node scripts/check-mermaid.mjs",
+    "docs:export:diagrams": "node scripts/check-mermaid.mjs --export",
+    "docs:build:api": "redocly build-docs docs/api/openapi.yaml -o dist/api.html"
+  },
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "12.0.0",
+    "@redocly/cli": "2.71.0",
+    "markdownlint-cli2": "0.24.0",
+    "puppeteer": "25.16.0",
+    "remark-cli": "12.0.1",
+    "remark-validate-links": "13.1.0"
+  }
+}
