@@ -32,8 +32,12 @@ The [documentation index](docs/README.md) shows where each course requirement is
 | Architecture | [docs/02-architecture.md](docs/02-architecture.md) | Done |
 | Error handling design | [docs/03-error-handling.md](docs/03-error-handling.md), [docs/api/openapi.yaml](docs/api/openapi.yaml) | Done |
 | Concurrency flows | [docs/04-concurrency.md](docs/04-concurrency.md) | Done |
-| Data, resiliency, security, deployment models | — | Planned |
-| Analytics and monitoring models | — | Planned |
+| Data model | [docs/05-data-model.md](docs/05-data-model.md) | Done |
+| Resiliency model | [docs/06-resiliency-model.md](docs/06-resiliency-model.md) | Done |
+| Security model | [docs/07-security-model.md](docs/07-security-model.md) | Done |
+| Deployment model | [docs/08-deployment-model.md](docs/08-deployment-model.md) | Done |
+| Analytics model | [docs/09-analytics-model.md](docs/09-analytics-model.md) | Done |
+| Monitoring and alerting model | [docs/10-monitoring-alerting-model.md](docs/10-monitoring-alerting-model.md) | Done |
 | Demo and report | — | Planned |
 
 To check the documentation, run `npm ci` and then `npm run docs:check` (Node.js 22.13 or later).

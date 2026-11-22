@@ -10,12 +10,12 @@ This folder contains the design documents of Shift Happens. Each document answer
 | 4 | Architecture: style, containers, services, AWS mapping | [02-architecture.md](02-architecture.md), [ADR-0001](adr/0001-architecture-style.md) | Done |
 | 5 | Error handling design | [03-error-handling.md](03-error-handling.md), [OpenAPI specification](api/openapi.yaml) | Done |
 | 6 | Concurrency patterns usage | [04-concurrency.md](04-concurrency.md) | Done |
-| 7 | Data model | Not started | Planned |
-| 8 | Resiliency model | Not started | Planned |
-| 9 | Security model | Not started | Planned |
-| 10 | Deployment model | Not started | Planned |
-| 11 | Analytics model | Not started | Planned |
-| 12 | Monitoring and alerting model | Not started | Planned |
+| 7 | Data model | [05-data-model.md](05-data-model.md) | Done |
+| 8 | Resiliency model | [06-resiliency-model.md](06-resiliency-model.md) | Done |
+| 9 | Security model | [07-security-model.md](07-security-model.md) | Done |
+| 10 | Deployment model | [08-deployment-model.md](08-deployment-model.md) | Done |
+| 11 | Analytics model | [09-analytics-model.md](09-analytics-model.md) | Done |
+| 12 | Monitoring and alerting model | [10-monitoring-alerting-model.md](10-monitoring-alerting-model.md) | Done |
 
 ## Where to find the course requirements
 
@@ -30,6 +30,17 @@ This folder contains the design documents of Shift Happens. Each document answer
 | Diagrams as code | All diagrams are Mermaid code in the Markdown files |
 | APIs with errors 400, 403, 404, 409, 422, 429 (min 10) | [api/openapi.yaml](api/openapi.yaml) and [03-error-handling.md](03-error-handling.md): 12 operations |
 | Concurrency flows (min 5) | [04-concurrency.md](04-concurrency.md): 6 scenarios with sequence diagrams |
+| Data model: ER diagrams, at least 5 entities | [05-data-model.md](05-data-model.md), sections 2 and 3: 48 tables in 5 ER diagrams |
+| Data classification and retention policy | [05-data-model.md](05-data-model.md), section 5 |
+| Consensus, batching, streaming, consistency | [05-data-model.md](05-data-model.md), sections 6 to 9 |
+| Component interaction diagram (min 5 interactions) | [06-resiliency-model.md](06-resiliency-model.md), sections 2 and 3: 6 interactions |
+| RMA workbook (min 3 failures per interaction) | [06-resiliency-model.md](06-resiliency-model.md), section 4: 18 failure modes |
+| Threat model of 2 flows | [07-security-model.md](07-security-model.md), sections 4 to 6: 3 flows with STRIDE |
+| Mitigation plan for 10 threats | [07-security-model.md](07-security-model.md), section 8 |
+| Infrastructure diagram with resource types | [08-deployment-model.md](08-deployment-model.md), sections 2 and 3 |
+| Functional metrics (10 to 15) and 2 funnels | [09-analytics-model.md](09-analytics-model.md), sections 2 and 3: 16 metrics, 3 funnels |
+| Operational metrics (10 to 15) and collection | [10-monitoring-alerting-model.md](10-monitoring-alerting-model.md), sections 2 and 3: 18 metrics |
+| Alert thresholds (5 to 10) and mitigation plan | [10-monitoring-alerting-model.md](10-monitoring-alerting-model.md), sections 5 to 7: 15 alert rules, 4 runbooks |
 
 ## Conventions
 
